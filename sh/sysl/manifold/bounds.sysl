@@ -1,0 +1,80 @@
+module sh.sysl.manifold
+
+import sh.sysl.manifold.c
+import sysl.raw.ptr_cast
+
+// An axis-aligned box in space: what `Manifold.bounding_box` answers and what `level_set` samples.
+// `include` grows it in place; every other operation answers a new box.
+struct Box
+    handle: *c.Box
+
+    min(&self) -> Vec3 = c.box_min(self.handle)
+    max(&self) -> Vec3 = c.box_max(self.handle)
+    dimensions(&self) -> Vec3 = c.box_dimensions(self.handle)
+    center(&self) -> Vec3 = c.box_center(self.handle)
+
+    // The largest absolute coordinate of either corner — the scale Manifold's tolerances are relative to.
+    scale(&self) -> f64 = c.box_scale(self.handle)
+
+    contains(&self, p: Vec3) -> bool = c.box_contains_pt(self.handle, p.x, p.y, p.z) != 0
+    contains_box(&self, other: &Box) -> bool = c.box_contains_box(self.handle, other.handle) != 0
+    overlaps(&self, p: Vec3) -> bool = c.box_does_overlap_pt(self.handle, p.x, p.y, p.z) != 0
+    overlaps_box(&self, other: &Box) -> bool = c.box_does_overlap_box(self.handle, other.handle) != 0
+    is_finite(&self) -> bool = c.box_is_finite(self.handle) != 0
+
+    // Grow this box, in place, to take in `p`.
+    include(&self, p: Vec3) = c.box_include_pt(self.handle, p.x, p.y, p.z)
+
+    union(&self, other: &Box) -> &Box = Box(c.box_union(ptr_cast(c.alloc_box()), self.handle, other.handle))
+    translate(&self, x: f64, y: f64, z: f64) -> &Box = Box(c.box_translate(ptr_cast(c.alloc_box()), self.handle, x, y, z))
+
+    // Each axis multiplied by its factor.
+    scaled(&self, x: f64, y: f64, z: f64) -> &Box = Box(c.box_mul(ptr_cast(c.alloc_box()), self.handle, x, y, z))
+
+    // Both corners carried through an affine map: `x`, `y`, `z` are where the unit axes go and `t` is
+    // the translation (the columns of a 3x4 matrix). Only the corners move, so this is for
+    // axis-aligned maps — scales and translations; a rotated box is not re-bounded.
+    transform(&self, x: Vec3, y: Vec3, z: Vec3, t: Vec3) -> &Box =
+        Box(c.box_transform(ptr_cast(c.alloc_box()), self.handle, x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z, t.x, t.y, t.z))
+end Box
+
+impl Drop for Box
+    drop(self) = c.delete_box(self.handle)
+
+// The box with corners `min` and `max`.
+box(min: Vec3, max: Vec3) -> &Box = Box(c.box(ptr_cast(c.alloc_box()), min.x, min.y, min.z, max.x, max.y, max.z))
+
+// An axis-aligned rectangle in the plane: what `CrossSection.bounds` answers.
+struct Rect
+    handle: *c.Rect
+
+    min(&self) -> Vec2 = c.rect_min(self.handle)
+    max(&self) -> Vec2 = c.rect_max(self.handle)
+    dimensions(&self) -> Vec2 = c.rect_dimensions(self.handle)
+    center(&self) -> Vec2 = c.rect_center(self.handle)
+    scale(&self) -> f64 = c.rect_scale(self.handle)
+
+    contains(&self, p: Vec2) -> bool = c.rect_contains_pt(self.handle, p.x, p.y) != 0
+    contains_rect(&self, other: &Rect) -> bool = c.rect_contains_rect(self.handle, other.handle) != 0
+    overlaps_rect(&self, other: &Rect) -> bool = c.rect_does_overlap_rect(self.handle, other.handle) != 0
+    is_empty(&self) -> bool = c.rect_is_empty(self.handle) != 0
+    is_finite(&self) -> bool = c.rect_is_finite(self.handle) != 0
+
+    // Grow this rectangle, in place, to take in `p`.
+    include(&self, p: Vec2) = c.rect_include_pt(self.handle, p.x, p.y)
+
+    union(&self, other: &Rect) -> &Rect = Rect(c.rect_union(ptr_cast(c.alloc_rect()), self.handle, other.handle))
+    translate(&self, x: f64, y: f64) -> &Rect = Rect(c.rect_translate(ptr_cast(c.alloc_rect()), self.handle, x, y))
+    scaled(&self, x: f64, y: f64) -> &Rect = Rect(c.rect_mul(ptr_cast(c.alloc_rect()), self.handle, x, y))
+
+    // Both corners carried through the map whose columns are `x`, `y` and `t`; as with `Box`, an
+    // axis-aligned map only.
+    transform(&self, x: Vec2, y: Vec2, t: Vec2) -> &Rect =
+        Rect(c.rect_transform(ptr_cast(c.alloc_rect()), self.handle, x.x, x.y, y.x, y.y, t.x, t.y))
+end Rect
+
+impl Drop for Rect
+    drop(self) = c.delete_rect(self.handle)
+
+// The rectangle with corners `min` and `max`.
+rect(min: Vec2, max: Vec2) -> &Rect = Rect(c.rect(ptr_cast(c.alloc_rect()), min.x, min.y, max.x, max.y))

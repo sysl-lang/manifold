@@ -1,0 +1,120 @@
+module sh.sysl.manifold
+
+import sh.sysl.manifold.c
+
+// The records Manifold passes by value, named here so a program never imports the raw layer.
+
+// A point or a direction in the plane.
+type Vec2 = c.Vec2
+
+// A point or a direction in space.
+type Vec3 = c.Vec3
+
+// Where a ray met a solid: the triangle, how far along the ray, the point, and the face normal.
+type RayHit = c.RayHit
+
+// Which boolean a `boolean` or a `batch` computes.
+enum Op
+    Add
+    Subtract
+    Intersect
+
+// How a set of contours, possibly overlapping or self-intersecting, decides what is inside. Clipper2's
+// rules; `Positive` (counter-clockwise is filled, a clockwise hole cuts it) is Manifold's default.
+enum FillRule
+    EvenOdd
+    NonZero
+    Positive
+    Negative
+
+// How `CrossSection.offset` turns a convex corner.
+enum JoinType
+    Square
+    Round
+    Miter
+    Bevel
+
+// What `Manifold.status` reports: `NoError` for a valid solid, otherwise why construction failed. An
+// operation on a failed solid answers an empty one carrying the first failure along.
+enum Status
+    NoError
+    NonFiniteVertex
+    NotManifold
+    VertexIndexOutOfBounds
+    PropertiesWrongLength
+    MissingPositionProperties
+    MergeVectorsDifferentLengths
+    MergeIndexOutOfBounds
+    TransformWrongLength
+    RunIndexWrongLength
+    FaceIdWrongLength
+    InvalidConstruction
+    ResultTooLarge
+    InvalidTangents
+    Cancelled
+    // A code this binding does not know — a newer Manifold than 3.5.
+    Unknown
+
+    // The status a `manifold_status` code names. The C enumeration counts from 0 in the order above.
+    of(code: int) -> Status
+        code match
+            0 -> NoError
+            1 -> NonFiniteVertex
+            2 -> NotManifold
+            3 -> VertexIndexOutOfBounds
+            4 -> PropertiesWrongLength
+            5 -> MissingPositionProperties
+            6 -> MergeVectorsDifferentLengths
+            7 -> MergeIndexOutOfBounds
+            8 -> TransformWrongLength
+            9 -> RunIndexWrongLength
+            10 -> FaceIdWrongLength
+            11 -> InvalidConstruction
+            12 -> ResultTooLarge
+            13 -> InvalidTangents
+            14 -> Cancelled
+            _ -> Unknown
+
+    ok(self) -> bool = self == NoError
+
+    // The status as a sentence, for a message.
+    describe(self) -> string
+        self match
+            NoError -> "no error"
+            NonFiniteVertex -> "a vertex is not finite"
+            NotManifold -> "the mesh is not manifold"
+            VertexIndexOutOfBounds -> "a triangle names a vertex that does not exist"
+            PropertiesWrongLength -> "the vertex properties are not a whole number of vertices"
+            MissingPositionProperties -> "a vertex has fewer than three properties, so no position"
+            MergeVectorsDifferentLengths -> "the merge vectors differ in length"
+            MergeIndexOutOfBounds -> "a merge names a vertex that does not exist"
+            TransformWrongLength -> "the run transforms are the wrong length"
+            RunIndexWrongLength -> "the run indices are the wrong length"
+            FaceIdWrongLength -> "the face ids are the wrong length"
+            InvalidConstruction -> "the construction parameters are invalid"
+            ResultTooLarge -> "the result is too large"
+            InvalidTangents -> "the halfedge tangents are invalid"
+            Cancelled -> "the operation was cancelled"
+            Unknown -> "an error this binding does not know"
+end Status
+
+// The C code for each enumeration, kept beside the enumerations so the order is visible in one place.
+private[manifold] op_code(op: Op) -> int
+    op match
+        Add -> c.OP_ADD
+        Subtract -> c.OP_SUBTRACT
+        Intersect -> c.OP_INTERSECT
+
+private[manifold] fill_code(rule: FillRule) -> int
+    rule match
+        EvenOdd -> c.FILL_RULE_EVEN_ODD
+        NonZero -> c.FILL_RULE_NON_ZERO
+        Positive -> c.FILL_RULE_POSITIVE
+        Negative -> c.FILL_RULE_NEGATIVE
+
+private[manifold] join_code(join: JoinType) -> int
+    join match
+        Square -> c.JOIN_TYPE_SQUARE
+        Round -> c.JOIN_TYPE_ROUND
+        Miter -> c.JOIN_TYPE_MITER
+        Bevel -> c.JOIN_TYPE_BEVEL

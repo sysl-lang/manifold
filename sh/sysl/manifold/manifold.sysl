@@ -1,0 +1,413 @@
+module sh.sysl.manifold
+
+import sh.sysl.manifold.c
+import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
+import sysl.slices.{as_ptr, as_mut_ptr}
+import sysl.text.cstring
+
+// A solid: a closed, oriented, manifold triangle mesh. Immutable — every operation answers a new
+// solid and leaves this one as it was — so a `&Manifold` may be shared freely. Booleans and
+// transforms are recorded and evaluated together the first time something is asked of the result,
+// which is why a chain of them costs one evaluation.
+//
+// A construction that fails answers an empty solid whose `status` says why, and every operation on
+// it carries that along; `of_mesh` and `read_obj` answer the `Status` as an `Err` instead.
+struct Manifold
+    handle: *c.Manifold
+
+    // -- What it is ----------------------------------------------------------------------------
+
+    status(&self) -> Status = Status.of(c.status(self.handle))
+    is_empty(&self) -> bool = c.is_empty(self.handle) != 0
+
+    num_vert(&self) -> usize = c.num_vert(self.handle)
+    num_edge(&self) -> usize = c.num_edge(self.handle)
+    num_tri(&self) -> usize = c.num_tri(self.handle)
+
+    // Properties per vertex beyond the position.
+    num_prop(&self) -> usize = c.num_prop(self.handle)
+    num_prop_vert(&self) -> usize = c.num_prop_vert(self.handle)
+
+    volume(&self) -> f64 = c.volume(self.handle)
+    surface_area(&self) -> f64 = c.surface_area(self.handle)
+
+    // Handles minus connected components: 0 for a ball, 1 for a torus. A union of two disjoint balls
+    // is -1.
+    genus(&self) -> int = c.genus(self.handle)
+
+    bounding_box(&self) -> &Box = Box(c.bounding_box(ptr_cast(c.alloc_box()), self.handle))
+    epsilon(&self) -> f64 = c.epsilon(self.handle)
+    tolerance(&self) -> f64 = c.get_tolerance(self.handle)
+
+    // The id `as_original` gave this solid, or -1 where it is a product of other solids.
+    original_id(&self) -> int = c.original_id(self.handle)
+
+    // The smallest distance between this solid and `other`, searched up to `search_length`; that
+    // length where nothing is closer.
+    min_gap(&self, other: &Manifold, search_length: f64) -> f64 = c.min_gap(self.handle, other.handle, search_length)
+
+    // Every crossing of the surface by the segment from `origin` to `end`, nearest first.
+    ray_cast(&self, origin: Vec3, end: Vec3) -> Buf[RayHit]
+        val hits = c.ray_cast(ptr_cast(c.alloc_ray_hit_vec()), self.handle, origin.x, origin.y, origin.z, end.x, end.y, end.z)
+        var out: Buf[RayHit] = buf()
+
+        for i in 0..<c.ray_hit_vec_length(hits)
+            out.push(c.ray_hit_vec_get(hits, i))
+
+        c.delete_ray_hit_vec(hits)
+        out
+    end ray_cast
+
+    // -- Booleans ------------------------------------------------------------------------------
+
+    union(&self, other: &Manifold) -> &Manifold = wrap(c.union(fresh(), self.handle, other.handle))
+    difference(&self, other: &Manifold) -> &Manifold = wrap(c.difference(fresh(), self.handle, other.handle))
+    intersection(&self, other: &Manifold) -> &Manifold = wrap(c.intersection(fresh(), self.handle, other.handle))
+    boolean(&self, other: &Manifold, op: Op) -> &Manifold = wrap(c.boolean(fresh(), self.handle, other.handle, op_code(op)))
+
+    // This solid cut by `cutter`: what is inside it, and what is outside.
+    split(&self, cutter: &Manifold) -> (&Manifold, &Manifold)
+        val pair = c.split(fresh(), fresh(), self.handle, cutter.handle)
+
+        (wrap(pair.first), wrap(pair.second))
+
+    // This solid cut by the plane `normal . p = offset`: the part on the normal's side, then the rest.
+    split_by_plane(&self, nx: f64, ny: f64, nz: f64, offset: f64) -> (&Manifold, &Manifold)
+        val pair = c.split_by_plane(fresh(), fresh(), self.handle, nx, ny, nz, offset)
+
+        (wrap(pair.first), wrap(pair.second))
+
+    // Only the part on the normal's side of the plane.
+    trim_by_plane(&self, nx: f64, ny: f64, nz: f64, offset: f64) -> &Manifold =
+        wrap(c.trim_by_plane(fresh(), self.handle, nx, ny, nz, offset))
+
+    minkowski_sum(&self, other: &Manifold) -> &Manifold = wrap(c.minkowski_sum(fresh(), self.handle, other.handle))
+    minkowski_difference(&self, other: &Manifold) -> &Manifold = wrap(c.minkowski_difference(fresh(), self.handle, other.handle))
+
+    hull(&self) -> &Manifold = wrap(c.hull(fresh(), self.handle))
+
+    // The connected components, each its own solid.
+    decompose(&self) -> Buf[&Manifold] = take_vec(c.decompose(ptr_cast(c.alloc_manifold_vec()), self.handle))
+
+    // -- Transforms ----------------------------------------------------------------------------
+
+    translate(&self, x: f64, y: f64, z: f64) -> &Manifold = wrap(c.translate(fresh(), self.handle, x, y, z))
+
+    // Degrees about x, then y, then z.
+    rotate(&self, x: f64, y: f64, z: f64) -> &Manifold = wrap(c.rotate(fresh(), self.handle, x, y, z))
+
+    scale(&self, x: f64, y: f64, z: f64) -> &Manifold = wrap(c.scale(fresh(), self.handle, x, y, z))
+
+    // Reflected through the plane through the origin with normal `(nx, ny, nz)`.
+    mirror(&self, nx: f64, ny: f64, nz: f64) -> &Manifold = wrap(c.mirror(fresh(), self.handle, nx, ny, nz))
+
+    // An affine map: `x`, `y`, `z` are where the unit axes go and `t` is the translation — the four
+    // columns of a 3x4 matrix.
+    transform(&self, x: Vec3, y: Vec3, z: Vec3, t: Vec3) -> &Manifold =
+        wrap(c.transform(fresh(), self.handle, x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z, t.x, t.y, t.z))
+
+    // Every vertex moved by `f`. The topology is kept, so `f` should not fold the surface through
+    // itself. **`f` may be called from several threads at once** on a large mesh, which is why it is
+    // a `&sync Fn`.
+    warp(&self, f: &sync Fn(Vec3) -> Vec3) -> &Manifold
+        var w = WarpFn(f)
+
+        wrap(c.warp(fresh(), self.handle, &warp_entry, ptr_cast(&w)))
+
+    // -- Refinement and smoothing --------------------------------------------------------------
+
+    // Every edge split into `n` pieces.
+    refine(&self, n: int) -> &Manifold = wrap(c.refine(fresh(), self.handle, n))
+    refine_to_length(&self, length: f64) -> &Manifold = wrap(c.refine_to_length(fresh(), self.handle, length))
+    refine_to_tolerance(&self, tolerance: f64) -> &Manifold = wrap(c.refine_to_tolerance(fresh(), self.handle, tolerance))
+
+    // Tangents from the normals stored at property `normal_idx`, for a later `refine`.
+    smooth_by_normals(&self, normal_idx: int) -> &Manifold = wrap(c.smooth_by_normals(fresh(), self.handle, normal_idx))
+
+    // Tangents that round every edge sharper than `min_sharp_angle` degrees off to `min_smoothness`.
+    smooth_out(&self, min_sharp_angle: f64 = 60.0, min_smoothness: f64 = 0.0) -> &Manifold =
+        wrap(c.smooth_out(fresh(), self.handle, min_sharp_angle, min_smoothness))
+
+    set_tolerance(&self, tolerance: f64) -> &Manifold = wrap(c.set_tolerance(fresh(), self.handle, tolerance))
+    simplify(&self, tolerance: f64 = 0.0) -> &Manifold = wrap(c.simplify(fresh(), self.handle, tolerance))
+
+    // -- Properties ----------------------------------------------------------------------------
+
+    // Normals written into properties `normal_idx` to `normal_idx + 2`, sharp where faces meet at more
+    // than `min_sharp_angle` degrees.
+    calculate_normals(&self, normal_idx: int, min_sharp_angle: f64 = 60.0) -> &Manifold =
+        wrap(c.calculate_normals(fresh(), self.handle, normal_idx, min_sharp_angle))
+
+    // Gaussian and mean curvature written into those properties; a negative index skips one.
+    calculate_curvature(&self, gaussian_idx: int, mean_idx: int) -> &Manifold =
+        wrap(c.calculate_curvature(fresh(), self.handle, gaussian_idx, mean_idx))
+
+    // `num_prop` properties per vertex, computed by `f` from the position and the old properties
+    // (`num_prop()` of them) into the new ones (`num_prop` of them). Called once per property vertex,
+    // **possibly from several threads at once**.
+    set_properties(&self, num_prop: int, f: &sync Fn(Vec3, []const f64, []f64) -> unit) -> &Manifold
+        var p = PropFn(f, self.num_prop(), usize(num_prop))
+
+        wrap(c.set_properties(fresh(), self.handle, num_prop, &props_entry, ptr_cast(&p)))
+
+    // This solid as a new original: its triangles get a fresh id that survives later booleans.
+    as_original(&self) -> &Manifold = wrap(c.as_original(fresh(), self.handle))
+
+    // -- Out -----------------------------------------------------------------------------------
+
+    to_mesh(&self) -> &MeshGL = MeshGL(c.get_meshgl(ptr_cast(c.alloc_meshgl()), self.handle))
+
+    // The mesh with vertices split wherever the normals at property `normal_idx` differ.
+    to_mesh_with_normals(&self, normal_idx: int) -> &MeshGL =
+        MeshGL(c.get_meshgl_w_normals(ptr_cast(c.alloc_meshgl()), self.handle, normal_idx))
+
+    to_mesh64(&self) -> &MeshGL64 = MeshGL64(c.get_meshgl64(ptr_cast(c.alloc_meshgl64()), self.handle))
+
+    to_mesh64_with_normals(&self, normal_idx: int) -> &MeshGL64 =
+        MeshGL64(c.get_meshgl64_w_normals(ptr_cast(c.alloc_meshgl64()), self.handle, normal_idx))
+
+    // The surface as a Wavefront OBJ document.
+    to_obj(&self) -> string
+        var sink = ObjText("")
+
+        c.write_obj(self.handle, &obj_entry, ptr_cast(&sink))
+        sink.text
+
+    // The region where the plane `z = height` cuts the solid.
+    slice(&self, height: f64) -> &CrossSection = section_of(c.slice(ptr_cast(c.alloc_polygons()), self.handle, height))
+
+    // The solid's shadow on the xy plane.
+    project(&self) -> &CrossSection = section_of(c.project(ptr_cast(c.alloc_polygons()), self.handle))
+
+    // -- Observing and cancelling --------------------------------------------------------------
+
+    // This solid with `ctx` attached: the next eager operation on it (`status`, a `refine`, `hull`, a
+    // Minkowski sum) reports progress to `ctx` and stops when it is cancelled.
+    with_context(&self, ctx: &Context) -> &Manifold = wrap(c.with_context(fresh(), self.handle, ctx.handle))
+end Manifold
+
+impl Drop for Manifold
+    drop(self) = c.delete_manifold(self.handle)
+
+// -- Making one -----------------------------------------------------------------------------------
+
+// A box from the origin to `(x, y, z)`, or centred on the origin.
+cube(x: f64, y: f64, z: f64, center: bool = false) -> &Manifold = wrap(c.cube(fresh(), x, y, z, flag(center)))
+
+// A sphere of `radius` around the origin. `segments` around the equator, or 0 for the global quality
+// setting (`set_circular_segments`).
+sphere(radius: f64, segments: int = 0) -> &Manifold = wrap(c.sphere(fresh(), radius, segments))
+
+// A cylinder, or a cone where the radii differ, standing on the xy plane (or centred on the origin).
+cylinder(height: f64, radius_low: f64, radius_high: f64, segments: int = 0, center: bool = false) -> &Manifold =
+    wrap(c.cylinder(fresh(), height, radius_low, radius_high, segments, flag(center)))
+
+// The regular tetrahedron with vertices at alternate corners of the cube from (-1, -1, -1) to (1, 1, 1).
+tetrahedron() -> &Manifold = wrap(c.tetrahedron(fresh()))
+
+// The empty solid.
+empty() -> &Manifold = wrap(c.empty(fresh()))
+
+// The convex hull of a set of points.
+hull_points(points: []const Vec3) -> &Manifold = wrap(c.hull_pts(fresh(), ptr_cast(as_ptr(points)), points.len))
+
+// A solid read from a mesh: `Err` with the reason where the mesh is not a closed manifold. With a
+// context, the ingest reports progress to it and stops when it is cancelled.
+of_mesh(mesh: &MeshGL, ctx: Option[&Context] = None) -> Result[&Manifold, Status]
+    val m = ctx match
+        Some(x) -> wrap(c.execution_context_of_meshgl(fresh(), x.handle, mesh.handle))
+        None -> wrap(c.of_meshgl(fresh(), mesh.handle))
+
+    checked(m)
+end of_mesh
+
+of_mesh64(mesh: &MeshGL64, ctx: Option[&Context] = None) -> Result[&Manifold, Status]
+    val m = ctx match
+        Some(x) -> wrap(c.execution_context_of_meshgl64(fresh(), x.handle, mesh.handle))
+        None -> wrap(c.of_meshgl64(fresh(), mesh.handle))
+
+    checked(m)
+end of_mesh64
+
+// A solid from a mesh with smoothing tangents: halfedge `half_edges[i]` is given smoothness
+// `smoothness[i]` (0 sharp, 1 fully smooth), every other edge is fully smooth. `refine` it to see the
+// curve. `Err(InvalidConstruction)` where the two slices differ in length.
+smooth(mesh: &MeshGL, half_edges: []const usize = [], smoothness: []const f64 = [],
+       ctx: Option[&Context] = None) -> Result[&Manifold, Status]
+    if half_edges.len != smoothness.len then return Err(Status.InvalidConstruction)
+
+    val m = ctx match
+        Some(x) -> wrap(c.execution_context_smooth(fresh(), x.handle, mesh.handle, ptr_cast(as_ptr(half_edges)),
+                                                   ptr_cast(as_ptr(smoothness)), half_edges.len))
+        None -> wrap(c.smooth(fresh(), mesh.handle, ptr_cast(as_ptr(half_edges)), ptr_cast(as_ptr(smoothness)), half_edges.len))
+
+    checked(m)
+end smooth
+
+smooth64(mesh: &MeshGL64, half_edges: []const usize = [], smoothness: []const f64 = [],
+         ctx: Option[&Context] = None) -> Result[&Manifold, Status]
+    if half_edges.len != smoothness.len then return Err(Status.InvalidConstruction)
+
+    val m = ctx match
+        Some(x) -> wrap(c.execution_context_smooth64(fresh(), x.handle, mesh.handle, ptr_cast(as_ptr(half_edges)),
+                                                     ptr_cast(as_ptr(smoothness)), half_edges.len))
+        None -> wrap(c.smooth64(fresh(), mesh.handle, ptr_cast(as_ptr(half_edges)), ptr_cast(as_ptr(smoothness)), half_edges.len))
+
+    checked(m)
+end smooth64
+
+// A solid read from a Wavefront OBJ document; `Err` where it holds no closed manifold.
+read_obj(text: string) -> Result[&Manifold, Status]
+    val s = cstring(text)
+    val m = wrap(c.read_obj(fresh(), s.ptr))
+
+    if m.is_empty() && m.status().ok() then Err(Status.InvalidConstruction) else checked(m)
+
+// The surface where `sdf` crosses `level`, sampled on a grid of `edge_length` inside `bounds`.
+// `sdf` is positive inside. `tolerance` is how far a vertex may sit off the true surface, negative for
+// Manifold's default. **`sdf` is called from several threads at once**, so it is a `&sync Fn`.
+level_set(sdf: &sync Fn(Vec3) -> f64, bounds: &Box, edge_length: f64, level: f64 = 0.0, tolerance: f64 = -1.0,
+          ctx: Option[&Context] = None) -> &Manifold
+    var s = SdfFn(sdf)
+
+    ctx match
+        Some(x) -> wrap(c.execution_context_level_set(fresh(), x.handle, &sdf_entry, bounds.handle, edge_length,
+                                                      level, tolerance, ptr_cast(&s)))
+        None -> wrap(c.level_set(fresh(), &sdf_entry, bounds.handle, edge_length, level, tolerance, ptr_cast(&s)))
+end level_set
+
+// -- Many at once -----------------------------------------------------------------------------------
+
+// One boolean over every solid, in one evaluation: the union of all, the first minus the rest, or
+// the intersection of all. Faster than folding `union` over them.
+batch(solids: []const &Manifold, op: Op) -> &Manifold
+    val v = vec_of(solids)
+    val m = wrap(c.batch_boolean(fresh(), v, op_code(op)))
+
+    c.delete_manifold_vec(v)
+    m
+end batch
+
+// The convex hull of every solid together.
+batch_hull(solids: []const &Manifold) -> &Manifold
+    val v = vec_of(solids)
+    val m = wrap(c.batch_hull(fresh(), v))
+
+    c.delete_manifold_vec(v)
+    m
+end batch_hull
+
+// Solids that do not overlap, gathered into one without a boolean — the inverse of `decompose`.
+compose(solids: []const &Manifold) -> &Manifold
+    val v = vec_of(solids)
+    val m = wrap(c.compose(fresh(), v))
+
+    c.delete_manifold_vec(v)
+    m
+end compose
+
+// -- The global quality setting -------------------------------------------------------------------
+
+// How many segments a circle of `radius` gets when a constructor is given 0.
+circular_segments(radius: f64) -> int = c.get_circular_segments(radius)
+
+// A fixed segment count for every circle made with 0 segments; 0 returns to the angle and length
+// rules below.
+set_circular_segments(n: int) = c.set_circular_segments(n)
+set_min_circular_angle(degrees: f64) = c.set_min_circular_angle(degrees)
+set_min_circular_edge_length(length: f64) = c.set_min_circular_edge_length(length)
+reset_to_circular_defaults() = c.reset_to_circular_defaults()
+
+// `n` fresh original ids, for meshes a program numbers itself; answers the first.
+reserve_ids(n: u32) -> u32 = c.reserve_ids(n)
+
+// -- An execution context ---------------------------------------------------------------------------
+
+// Progress and cancellation for a long evaluation. Safe to read and to cancel from any thread.
+struct Context
+    handle: *c.ExecutionContext
+
+    // Ask the evaluation to stop. Idempotent, and sticky: a cancelled context stays cancelled.
+    cancel(&self) = c.execution_context_cancel(self.handle)
+    cancelled(&self) -> bool = c.execution_context_cancelled(self.handle) != 0
+
+    // From 0 to 1; 1 where nothing has been scheduled.
+    progress(&self) -> f64 = c.execution_context_progress(self.handle)
+end Context
+
+impl Drop for Context
+    drop(self) = c.delete_execution_context(self.handle)
+
+context() -> &Context = Context(c.execution_context(ptr_cast(c.alloc_execution_context())))
+
+// -- The plumbing -----------------------------------------------------------------------------------
+
+// Storage for one more `ManifoldManifold`, which the constructor it is handed fills.
+private[manifold] fresh() -> *u8 = ptr_cast(c.alloc_manifold())
+
+private[manifold] wrap(h: *c.Manifold) -> &Manifold = Manifold(h)
+
+private flag(b: bool) -> int = if b then 1 else 0
+
+private checked(m: &Manifold) -> Result[&Manifold, Status]
+    val s = m.status()
+
+    if s.ok() then Ok(m) else Err(s)
+
+// A `ManifoldManifoldVec` holding a copy of each handle (a copy shares the solid). The caller
+// deletes it.
+private vec_of(solids: []const &Manifold) -> *c.ManifoldVec
+    val v = c.manifold_empty_vec(ptr_cast(c.alloc_manifold_vec()))
+
+    c.manifold_vec_reserve(v, solids.len)
+
+    for m in solids
+        c.manifold_vec_push_back(v, m.handle)
+
+    v
+end vec_of
+
+// Each solid of `v` copied out, and `v` deleted.
+private take_vec(v: *c.ManifoldVec) -> Buf[&Manifold]
+    var out: Buf[&Manifold] = buf()
+
+    for i in 0..<c.manifold_vec_length(v)
+        out.push(wrap(c.manifold_vec_get(fresh(), v, i)))
+
+    c.delete_manifold_vec(v)
+    out
+end take_vec
+
+// The callbacks. Manifold hands back the `void *` it was given, which is the address of one of these
+// on the calling frame — every call below is synchronous, so the frame outlives it. `warp` and
+// `set_properties` take or answer a `ManifoldVec3` by value, and a function with an aggregate in its
+// signature has a C-callable address only when it is exported.
+
+private struct WarpFn
+    f: &sync Fn(Vec3) -> Vec3
+
+@export("sysl_manifold_warp_entry")
+private warp_entry(x: f64, y: f64, z: f64, ctx: *u8) -> Vec3
+    val w: *WarpFn = ptr_cast(ctx)
+
+    (*w).f(Vec3(x, y, z))
+
+private struct SdfFn
+    f: &sync Fn(Vec3) -> f64
+
+private sdf_entry(x: f64, y: f64, z: f64, ctx: *u8) -> f64
+    val s: *SdfFn = ptr_cast(ctx)
+
+    (*s).f(Vec3(x, y, z))
+
+private struct PropFn
+    f: &sync Fn(Vec3, []const f64, []f64) -> unit
+    old: usize
+    new: usize
+
+@export("sysl_manifold_props_entry")
+private props_entry(new_prop: *f64, position: Vec3, old_prop: *f64, ctx: *u8)
+    val p: *PropFn = ptr_cast(ctx)
+
+    (*p).f(position, old_prop[0..<(*p).old], new_prop[0..<(*p).new])

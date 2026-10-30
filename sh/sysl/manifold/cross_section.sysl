@@ -1,0 +1,179 @@
+module sh.sysl.manifold
+
+import sh.sysl.manifold.c
+import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
+
+// A region of the plane: a set of non-overlapping contours, outer ones counter-clockwise and holes
+// clockwise. Immutable, like `Manifold`, and the 2D half of it — the shape `extrude` and `revolve`
+// lift into a solid.
+struct CrossSection
+    handle: *c.CrossSection
+
+    area(&self) -> f64 = c.cross_section_area(self.handle)
+    num_vert(&self) -> usize = c.cross_section_num_vert(self.handle)
+    num_contour(&self) -> usize = c.cross_section_num_contour(self.handle)
+    is_empty(&self) -> bool = c.cross_section_is_empty(self.handle) != 0
+    bounds(&self) -> &Rect = Rect(c.cross_section_bounds(ptr_cast(c.alloc_rect()), self.handle))
+
+    // The contours, copied out.
+    to_polygons(&self) -> Buf[Buf[Vec2]] = take_polygons(c.cross_section_to_polygons(ptr_cast(c.alloc_polygons()), self.handle))
+
+    union(&self, other: &CrossSection) -> &CrossSection = section(c.cross_section_union(fresh_section(), self.handle, other.handle))
+    difference(&self, other: &CrossSection) -> &CrossSection = section(c.cross_section_difference(fresh_section(), self.handle, other.handle))
+    intersection(&self, other: &CrossSection) -> &CrossSection = section(c.cross_section_intersection(fresh_section(), self.handle, other.handle))
+
+    boolean(&self, other: &CrossSection, op: Op) -> &CrossSection =
+        section(c.cross_section_boolean(fresh_section(), self.handle, other.handle, op_code(op)))
+
+    hull(&self) -> &CrossSection = section(c.cross_section_hull(fresh_section(), self.handle))
+
+    // The connected regions, each with its holes.
+    decompose(&self) -> Buf[&CrossSection]
+        val v = c.cross_section_decompose(ptr_cast(c.alloc_cross_section_vec()), self.handle)
+        var out: Buf[&CrossSection] = buf()
+
+        for i in 0..<c.cross_section_vec_length(v)
+            out.push(section(c.cross_section_vec_get(fresh_section(), v, i)))
+
+        c.delete_cross_section_vec(v)
+        out
+    end decompose
+
+    translate(&self, x: f64, y: f64) -> &CrossSection = section(c.cross_section_translate(fresh_section(), self.handle, x, y))
+
+    // Degrees, counter-clockwise.
+    rotate(&self, degrees: f64) -> &CrossSection = section(c.cross_section_rotate(fresh_section(), self.handle, degrees))
+
+    scale(&self, x: f64, y: f64) -> &CrossSection = section(c.cross_section_scale(fresh_section(), self.handle, x, y))
+
+    // Reflected across the line through the origin perpendicular to `(ax, ay)`.
+    mirror(&self, ax: f64, ay: f64) -> &CrossSection = section(c.cross_section_mirror(fresh_section(), self.handle, ax, ay))
+
+    // An affine map: `x` and `y` are where the unit axes go and `t` is the translation.
+    transform(&self, x: Vec2, y: Vec2, t: Vec2) -> &CrossSection =
+        section(c.cross_section_transform(fresh_section(), self.handle, x.x, x.y, y.x, y.y, t.x, t.y))
+
+    // Every vertex moved by `f`; the result is cleaned of any self-intersection `f` made.
+    warp(&self, f: &sync Fn(Vec2) -> Vec2) -> &CrossSection
+        var w = WarpFn2(f)
+
+        section(c.cross_section_warp_context(fresh_section(), self.handle, &warp2_entry, ptr_cast(&w)))
+
+    // Vertices closer than `epsilon` to the line through their neighbours removed.
+    simplify(&self, epsilon: f64 = 1e-6) -> &CrossSection = section(c.cross_section_simplify(fresh_section(), self.handle, epsilon))
+
+    // Grown by `delta` (shrunk where it is negative), corners turned by `join`. `miter_limit` bounds a
+    // `Miter` corner's spike as a multiple of `delta`; `segments` is a `Round` corner's full-circle
+    // count, 0 for the global quality setting.
+    offset(&self, delta: f64, join: JoinType = JoinType.Round, miter_limit: f64 = 2.0, segments: int = 0) -> &CrossSection =
+        section(c.cross_section_offset(fresh_section(), self.handle, delta, join_code(join), miter_limit, segments))
+
+    // Lifted along z to `height` in `slices` steps, turning by `twist` degrees and scaling to
+    // `(scale_x, scale_y)` at the top. `slices` 0 means one, or as many as the twist needs.
+    extrude(&self, height: f64, slices: int = 0, twist: f64 = 0.0, scale_x: f64 = 1.0, scale_y: f64 = 1.0) -> &Manifold
+        val ps = c.cross_section_to_polygons(ptr_cast(c.alloc_polygons()), self.handle)
+        val m = wrap(c.extrude(fresh(), ps, height, slices, twist, scale_x, scale_y))
+
+        c.delete_polygons(ps)
+        m
+    end extrude
+
+    // Swept around the y axis by `degrees` (the part with x < 0 is dropped), then stood up so the
+    // axis is z. `segments` around a full turn, 0 for the global quality setting.
+    revolve(&self, segments: int = 0, degrees: f64 = 360.0) -> &Manifold
+        val ps = c.cross_section_to_polygons(ptr_cast(c.alloc_polygons()), self.handle)
+        val m = wrap(c.revolve(fresh(), ps, segments, degrees))
+
+        c.delete_polygons(ps)
+        m
+    end revolve
+end CrossSection
+
+impl Drop for CrossSection
+    drop(self) = c.delete_cross_section(self.handle)
+
+// A rectangle from the origin to `(x, y)`, or centred on the origin.
+square(x: f64, y: f64, center: bool = false) -> &CrossSection = section(c.cross_section_square(fresh_section(), x, y, if center then 1 else 0))
+
+// A circle of `radius` around the origin, `segments` around, 0 for the global quality setting.
+circle(radius: f64, segments: int = 0) -> &CrossSection = section(c.cross_section_circle(fresh_section(), radius, segments))
+
+// The region `contours` enclose under `fill`. Contours may overlap and cross themselves; the result
+// is cleaned into one that does not.
+cross_section(contours: []const []const Vec2, fill: FillRule = FillRule.Positive) -> &CrossSection
+    val ps = polygons_of(contours)
+    val cs = section(c.cross_section_of_polygons(fresh_section(), ps, fill_code(fill)))
+
+    c.delete_polygons(ps)
+    cs
+end cross_section
+
+// The empty region.
+empty_section() -> &CrossSection = section(c.cross_section_empty(fresh_section()))
+
+// The convex hull of a set of points.
+hull_of_points(points: []const Vec2) -> &CrossSection
+    val ps = polygons_of([points])
+    val cs = section(c.cross_section_hull_polygons(fresh_section(), ps))
+
+    c.delete_polygons(ps)
+    cs
+end hull_of_points
+
+// One boolean over every region, as `batch` is for solids.
+batch_sections(sections: []const &CrossSection, op: Op) -> &CrossSection
+    val v = section_vec(sections)
+    val cs = section(c.cross_section_batch_boolean(fresh_section(), v, op_code(op)))
+
+    c.delete_cross_section_vec(v)
+    cs
+end batch_sections
+
+batch_hull_sections(sections: []const &CrossSection) -> &CrossSection
+    val v = section_vec(sections)
+    val cs = section(c.cross_section_batch_hull(fresh_section(), v))
+
+    c.delete_cross_section_vec(v)
+    cs
+end batch_hull_sections
+
+// Regions gathered into one without a boolean — the inverse of `decompose`.
+compose_sections(sections: []const &CrossSection) -> &CrossSection
+    val v = section_vec(sections)
+    val cs = section(c.cross_section_compose(fresh_section(), v))
+
+    c.delete_cross_section_vec(v)
+    cs
+end compose_sections
+
+// The region a `ManifoldPolygons` encloses under the positive rule, and the polygons deleted.
+private[manifold] section_of(ps: *c.Polygons) -> &CrossSection
+    val cs = section(c.cross_section_of_polygons(fresh_section(), ps, c.FILL_RULE_POSITIVE))
+
+    c.delete_polygons(ps)
+    cs
+
+private fresh_section() -> *u8 = ptr_cast(c.alloc_cross_section())
+
+private section(h: *c.CrossSection) -> &CrossSection = CrossSection(h)
+
+private section_vec(sections: []const &CrossSection) -> *c.CrossSectionVec
+    val v = c.cross_section_empty_vec(ptr_cast(c.alloc_cross_section_vec()))
+
+    c.cross_section_vec_reserve(v, sections.len)
+
+    for s in sections
+        c.cross_section_vec_push_back(v, s.handle)
+
+    v
+end section_vec
+
+private struct WarpFn2
+    f: &sync Fn(Vec2) -> Vec2
+
+@export("sysl_manifold_warp2_entry")
+private warp2_entry(x: f64, y: f64, ctx: *u8) -> Vec2
+    val w: *WarpFn2 = ptr_cast(ctx)
+
+    (*w).f(Vec2(x, y))

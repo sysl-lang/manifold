@@ -1,0 +1,894 @@
+module sh.sysl.manifold
+@tests
+
+import sh.sysl.manifold.c
+import sysl.buf.{Buf, buf}
+
+// What this binding claims, run by `sysl test .`. The oracle is geometry with a closed form — a box's
+// volume and area, a sphere converging to 4/3·π·r³, the overlap of two offset cubes — never Manifold's
+// own answer read back.
+//
+// **No test here uses the global circle quality** (a `segments` of 0) except the one that sets it,
+// because the setting is process-wide and the tests run concurrently.
+
+val PI = 3.141592653589793
+
+private near(got: f64, want: f64, tol: f64) -> bool
+    val d = got - want
+
+    (if d < 0.0 then -d else d) <= tol
+
+private assert_near(got: f64, want: f64, tol: f64, msg: string) =
+    assert(near(got, want, tol), s"${msg}: got ${got}, want ${want} within ${tol}")
+
+private assert_vec3(got: Vec3, x: f64, y: f64, z: f64, msg: string) =
+    assert(near(got.x, x, 1e-9) && near(got.y, y, 1e-9) && near(got.z, z, 1e-9),
+           s"${msg}: got (${got.x}, ${got.y}, ${got.z}), want (${x}, ${y}, ${z})")
+
+// -- The layout the two sides have to agree about ---------------------------------------------------
+
+// **This package compiles no C** (see `c/c.sysl`), so no `c const` can measure the records. The
+// numbers are what clang printed for `sizeof`/`offsetof` over `manifold/types.h` 3.5.4 on arm64 and
+// x86-64 alike (every field is 8 bytes wide), and a record that drifted from them reads wrong bytes.
+@test
+the_records_are_laid_out_as_types_h_lays_them_out() =
+    assert_eq(sizeof(c.Vec2), 16, "ManifoldVec2")
+    assert_eq(sizeof(c.Vec3), 24, "ManifoldVec3")
+    assert_eq(sizeof(c.ManifoldPair), 16, "ManifoldManifoldPair")
+    assert_eq(sizeof(c.RayHit), 64, "ManifoldRayHit")
+    assert_eq(offsetof(c.RayHit, distance), 8, "ManifoldRayHit.distance")
+    assert_eq(offsetof(c.RayHit, position), 16, "ManifoldRayHit.position")
+    assert_eq(offsetof(c.RayHit, normal), 40, "ManifoldRayHit.normal")
+    assert_eq(sizeof(c.MeshGLOptions), 64, "ManifoldMeshGLOptions")
+    assert_eq(offsetof(c.MeshGLOptions, halfedge_tangents), 56, "ManifoldMeshGLOptions.halfedge_tangents")
+    assert_eq(sizeof(c.MeshGL64Options), 64, "ManifoldMeshGL64Options")
+
+// And the handle sizes the library reports, which no sysl declaration depends on but which say the
+// library loaded is the one this was written against.
+@test
+the_library_answers_its_own_storage_sizes() =
+    assert(c.manifold_size() > 0, "a Manifold has a size")
+    assert_eq(c.manifold_pair_size(), sizeof(c.ManifoldPair), "the pair the library returns by value")
+
+// -- Primitives -------------------------------------------------------------------------------------
+
+@test
+a_box_has_the_volume_and_area_of_a_box() =
+    val b = cube(2.0, 3.0, 4.0)
+
+    assert_eq(b.status(), Status.NoError, "a valid solid")
+    assert_near(b.volume(), 24.0, 1e-9, "2 x 3 x 4")
+    assert_near(b.surface_area(), 52.0, 1e-9, "2(6 + 8 + 12)")
+    assert_eq(b.genus(), 0, "no handles")
+    assert_eq(b.num_vert(), 8, "eight corners")
+    assert_eq(b.num_tri(), 12, "two triangles a face")
+    assert_eq(b.num_edge(), 18, "Euler: V - E + F = 2")
+    assert(!b.is_empty(), "not empty")
+
+@test
+a_centred_box_is_centred() =
+    val bb = cube(2.0, 3.0, 4.0, center = true).bounding_box()
+
+    assert_vec3(bb.min(), -1.0, -1.5, -2.0, "min")
+    assert_vec3(bb.max(), 1.0, 1.5, 2.0, "max")
+    assert_vec3(bb.center(), 0.0, 0.0, 0.0, "center")
+
+    val corner = cube(2.0, 3.0, 4.0).bounding_box()
+
+    assert_vec3(corner.min(), 0.0, 0.0, 0.0, "uncentred min")
+    assert_vec3(corner.dimensions(), 2.0, 3.0, 4.0, "dimensions")
+
+// A polyhedral sphere is inscribed, so it is always a little small, and the deficit shrinks as the
+// segment count grows.
+@test
+a_sphere_converges_to_four_thirds_pi_r_cubed() =
+    val r = 2.0
+    val exact = 4.0 / 3.0 * PI * r * r * r
+    val coarse = sphere(r, 16).volume()
+    val fine = sphere(r, 256).volume()
+
+    assert(coarse < exact && fine < exact, "inscribed, so short of the exact volume")
+    assert(exact - fine < exact - coarse, "more segments, closer")
+    assert_near(fine, exact, exact * 1e-3, "256 segments within 0.1%")
+
+@test
+a_cylinder_converges_to_pi_r_squared_h() =
+    val exact = PI * 1.5 * 1.5 * 2.0
+
+    assert_near(cylinder(2.0, 1.5, 1.5, 256).volume(), exact, exact * 1e-3, "cylinder")
+
+    // A cone is a third of its cylinder.
+    assert_near(cylinder(2.0, 1.5, 0.0, 256).volume(), exact / 3.0, exact * 1e-3, "cone")
+
+    val bb = cylinder(2.0, 1.0, 1.0, 32, center = true).bounding_box()
+
+    assert_near(bb.min().z, -1.0, 1e-9, "centred cylinder")
+
+@test
+a_tetrahedron_is_a_third_of_its_cube() =
+    // Alternate corners of the cube of side 2: 8 - 4 corner pyramids of 4/3 each.
+    assert_near(tetrahedron().volume(), 8.0 / 3.0, 1e-9, "tetrahedron")
+    assert_eq(tetrahedron().num_tri(), 4, "four faces")
+
+@test
+the_empty_solid_is_empty() =
+    val e = empty()
+
+    assert(e.is_empty(), "empty")
+    assert_eq(e.volume(), 0.0, "no volume")
+    assert_eq(e.status(), Status.NoError, "and not an error")
+
+// -- Booleans ---------------------------------------------------------------------------------------
+
+// Two unit cubes overlapping by three quarters: every boolean has a volume that can be written down,
+// and the difference (0.25) is not the intersection (0.75), so a swapped operation cannot pass.
+@test
+overlapping_cubes_combine_by_their_overlap() =
+    val a = cube(1.0, 1.0, 1.0)
+    val b = cube(1.0, 1.0, 1.0).translate(0.25, 0.0, 0.0)
+
+    assert_near(a.union(b).volume(), 1.25, 1e-9, "union")
+    assert_near(a.intersection(b).volume(), 0.75, 1e-9, "intersection")
+    assert_near(a.difference(b).volume(), 0.25, 1e-9, "difference")
+    assert_near(a.boolean(b, Op.Add).volume(), 1.25, 1e-9, "Op.Add")
+    assert_near(a.boolean(b, Op.Subtract).volume(), 0.25, 1e-9, "Op.Subtract")
+    assert_near(a.boolean(b, Op.Intersect).volume(), 0.75, 1e-9, "Op.Intersect")
+    assert_near(a.union(b).surface_area(), 2.0 * (1.25 + 1.25 + 1.0), 1e-9, "a 1.25 x 1 x 1 box")
+
+// A hole drilled through a block is a handle.
+@test
+drilling_through_makes_genus_one() =
+    val block = cube(2.0, 2.0, 2.0, center = true)
+    val drilled = block.difference(cylinder(4.0, 0.5, 0.5, 32, center = true))
+
+    assert_eq(drilled.genus(), 1, "one hole through")
+
+    // A blind hole is not a handle.
+    val blind = block.difference(cylinder(1.5, 0.5, 0.5, 32))
+
+    assert_eq(blind.genus(), 0, "a hole that stops is no handle")
+
+@test
+a_batch_boolean_is_the_fold_of_its_pairs() =
+    val a = cube(1.0, 1.0, 1.0)
+    val b = cube(1.0, 1.0, 1.0).translate(0.5, 0.0, 0.0)
+    val c3 = cube(1.0, 1.0, 1.0).translate(1.0, 0.0, 0.0)
+
+    assert_near(batch([a, b, c3], Op.Add).volume(), 2.0, 1e-9, "union of three overlapping")
+    assert_near(batch([a, b, c3], Op.Subtract).volume(), 0.5, 1e-9, "the first minus the rest")
+    assert_near(batch([a, b, c3], Op.Intersect).volume(), 0.0, 1e-9, "a and c3 only touch")
+    assert_near(batch([a, b], Op.Intersect).volume(), 0.5, 1e-9, "intersection of two")
+
+// Disjoint solids: a union of three has three components, so genus 1 - 3 = -2.
+@test
+disjoint_solids_decompose_back_into_their_parts() =
+    val parts = [cube(1.0, 1.0, 1.0), cube(1.0, 1.0, 1.0).translate(3.0, 0.0, 0.0), cube(2.0, 2.0, 2.0).translate(6.0, 0.0, 0.0)]
+    val all = batch(parts, Op.Add)
+
+    assert_near(all.volume(), 10.0, 1e-9, "1 + 1 + 8")
+    assert_eq(all.genus(), -2, "three components")
+
+    val back = all.decompose()
+
+    assert_eq(back.len(), 3, "three parts")
+
+    var total = 0.0
+
+    for p in back.view()
+        total += p.volume()
+
+    assert_near(total, 10.0, 1e-9, "the parts add up")
+    assert_near(compose(back.view()).volume(), 10.0, 1e-9, "compose is the inverse")
+
+@test
+a_split_has_both_halves() =
+    val block = cube(2.0, 2.0, 2.0, center = true)
+    val (inside, outside) = block.split(cube(1.0, 1.0, 1.0))
+
+    assert_near(inside.volume(), 1.0, 1e-9, "the part inside the cutter")
+    assert_near(outside.volume(), 7.0, 1e-9, "the rest")
+
+    val (above, below) = block.split_by_plane(0.0, 0.0, 1.0, 0.5)
+
+    assert_near(above.volume(), 2.0, 1e-9, "z > 0.5: 2 x 2 x 0.5")
+    assert_near(below.volume(), 6.0, 1e-9, "z < 0.5")
+    assert_near(block.trim_by_plane(0.0, 0.0, 1.0, 0.5).volume(), 2.0, 1e-9, "trim keeps the normal's side")
+    assert_near(block.trim_by_plane(1.0, 0.0, 0.0, -0.5).volume(), 6.0, 1e-9, "x > -0.5")
+
+@test
+a_minkowski_sum_of_boxes_adds_their_sides() =
+    val sum = cube(1.0, 2.0, 3.0).minkowski_sum(cube(1.0, 1.0, 1.0))
+
+    assert_near(sum.volume(), 2.0 * 3.0 * 4.0, 1e-9, "(1+1)(2+1)(3+1)")
+
+    val diff = cube(3.0, 3.0, 3.0).minkowski_difference(cube(1.0, 1.0, 1.0))
+
+    assert_near(diff.volume(), 8.0, 1e-9, "(3-1)^3")
+
+@test
+the_gap_between_two_solids_is_measured() =
+    val a = cube(1.0, 1.0, 1.0)
+    val b = cube(1.0, 1.0, 1.0).translate(2.5, 0.0, 0.0)
+
+    assert_near(a.min_gap(b, 5.0), 1.5, 1e-9, "1.5 apart")
+    assert_near(a.min_gap(b, 1.0), 1.0, 1e-9, "nothing within the search length answers it")
+
+// -- Hulls ------------------------------------------------------------------------------------------
+
+@test
+the_hull_of_points_is_their_convex_solid() =
+    // The corner tetrahedron of the unit cube: 1/6.
+    assert_near(hull_points([Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0)]).volume(),
+                1.0 / 6.0, 1e-9, "corner tetrahedron")
+
+    // An interior point changes nothing.
+    var pts: Buf[Vec3] = buf()
+
+    for i in 0..<8
+        pts.push(Vec3(f64(i & 1), f64((i >> 1) & 1), f64((i >> 2) & 1)))
+
+    pts.push(Vec3(0.5, 0.5, 0.5))
+    assert_near(hull_points(pts.view()).volume(), 1.0, 1e-9, "unit cube from its corners")
+
+@test
+the_hull_of_two_boxes_spans_the_gap() =
+    val a = cube(1.0, 1.0, 1.0)
+    val b = cube(1.0, 1.0, 1.0).translate(2.0, 0.0, 0.0)
+
+    assert_near(batch_hull([a, b]).volume(), 3.0, 1e-9, "a 3 x 1 x 1 box")
+    assert_near(batch([a, b], Op.Add).hull().volume(), 3.0, 1e-9, "the hull of the union")
+
+    // An L is not convex; its hull fills the corner.
+    val l = cube(2.0, 1.0, 1.0).union(cube(1.0, 2.0, 1.0))
+
+    assert_near(l.volume(), 3.0, 1e-9, "the L")
+    assert_near(l.hull().volume(), 3.5, 1e-9, "the L's hull")
+
+// -- Transforms -------------------------------------------------------------------------------------
+
+@test
+transforms_move_the_bounding_box() =
+    val b = cube(1.0, 2.0, 3.0)
+
+    assert_vec3(b.translate(1.0, 2.0, 3.0).bounding_box().min(), 1.0, 2.0, 3.0, "translate")
+    assert_vec3(b.scale(2.0, 3.0, 4.0).bounding_box().max(), 2.0, 6.0, 12.0, "scale")
+    assert_near(b.scale(2.0, 3.0, 4.0).volume(), 6.0 * 24.0, 1e-9, "scale multiplies volume")
+    assert_vec3(b.rotate(0.0, 0.0, 90.0).bounding_box().dimensions(), 2.0, 1.0, 3.0, "a quarter turn about z swaps x and y")
+    assert_vec3(b.rotate(90.0, 0.0, 0.0).bounding_box().dimensions(), 1.0, 3.0, 2.0, "about x swaps y and z")
+    assert_vec3(b.mirror(1.0, 0.0, 0.0).bounding_box().min(), -1.0, 0.0, 0.0, "mirror through x = 0")
+    assert_near(b.mirror(1.0, 0.0, 0.0).volume(), 6.0, 1e-9, "and still outward-facing")
+
+@test
+a_matrix_transform_is_column_major() =
+    // x -> y, y -> -x, z -> z, then moved by (10, 20, 30): a quarter turn and a translation.
+    val t = cube(1.0, 2.0, 3.0).transform(Vec3(0.0, 1.0, 0.0), Vec3(-1.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), Vec3(10.0, 20.0, 30.0))
+    val bb = t.bounding_box()
+
+    assert_vec3(bb.min(), 8.0, 20.0, 30.0, "min")
+    assert_vec3(bb.max(), 10.0, 21.0, 33.0, "max")
+
+@test
+a_warp_moves_every_vertex() =
+    val stretched = cube(1.0, 1.0, 1.0).warp(v -> Vec3(v.x * 2.0, v.y, v.z + v.x))
+
+    // A shear keeps volume; the stretch doubles it.
+    assert_near(stretched.volume(), 2.0, 1e-9, "x doubled, z sheared")
+    assert_vec3(stretched.bounding_box().max(), 2.0, 1.0, 2.0, "the far top corner")
+
+    // A closure may capture.
+    val k = 3.0
+
+    assert_near(cube(1.0, 1.0, 1.0).warp(v -> Vec3(v.x, v.y, v.z * k)).volume(), 3.0, 1e-9, "captured factor")
+
+// -- Refinement and smoothing ------------------------------------------------------------------------
+
+@test
+refining_splits_every_edge() =
+    val t = tetrahedron()
+
+    assert_eq(t.refine(3).num_tri(), 4 * 9, "n squared triangles per face")
+    assert_near(t.refine(3).volume(), t.volume(), 1e-9, "flat refinement keeps the shape")
+    assert(t.refine_to_length(0.5).num_tri() > t.num_tri(), "to a length")
+
+    // Smoothing then refining rounds the corners off, which takes volume away.
+    val round = cube(1.0, 1.0, 1.0).smooth_out().refine(4)
+
+    assert_eq(round.status(), Status.NoError, "a valid solid")
+    assert(round.volume() < 1.0 && round.volume() > 0.5, s"rounded: ${round.volume()}")
+
+@test
+simplify_undoes_flat_refinement() =
+    val fine = cube(1.0, 1.0, 1.0).refine(4)
+
+    assert(fine.num_tri() > 12, "refined")
+    assert_eq(fine.simplify(1e-6).num_tri(), 12, "back to two triangles a face")
+    assert_near(cube(1.0, 1.0, 1.0).set_tolerance(0.01).tolerance(), 0.01, 1e-12, "tolerance")
+
+// -- Properties -------------------------------------------------------------------------------------
+
+private z_and_old_count(pos: Vec3, old: []const f64, out: []f64)
+    out[0] = pos.z
+    out[1] = f64(old.len)
+
+@test
+set_properties_computes_per_vertex_data() =
+    val m = cube(1.0, 2.0, 3.0).set_properties(2, z_and_old_count)
+
+    assert_eq(m.num_prop(), 2, "two properties")
+
+    val mesh = m.to_mesh()
+    val props = mesh.vert_properties()
+
+    assert_eq(mesh.num_prop(), 5, "position plus two")
+
+    for v in 0..<mesh.num_vert()
+        assert_eq(f64(props.at(v * 5 + 3)), f64(props.at(v * 5 + 2)), "property 0 is z")
+        assert_eq(props.at(v * 5 + 4), 0.0,"the cube had no properties before")
+
+@test
+normals_are_written_into_properties() =
+    val m = cube(1.0, 1.0, 1.0).calculate_normals(0)
+
+    assert_eq(m.num_prop(), 3, "three for the normal")
+
+    val mesh = m.to_mesh_with_normals(0)
+
+    // Sharp edges split the corners: three normals at each of eight corners.
+    assert_eq(mesh.num_vert(), 24, "split at every sharp edge")
+
+@test
+curvature_of_a_sphere_is_one_over_r_squared() =
+    val m = sphere(2.0, 64).calculate_curvature(0, -1)
+    val props = m.to_mesh().vert_properties()
+    val n = m.to_mesh().num_vert()
+    var mean = 0.0
+
+    for v in 0..<n
+        mean += f64(props.at(v * 4 + 3))
+
+    assert_near(mean / f64(n), 0.25, 0.02, "Gaussian curvature 1/r^2")
+
+@test
+as_original_gives_a_fresh_id() =
+    val a = cube(1.0, 1.0, 1.0).as_original()
+    val b = cube(1.0, 1.0, 1.0).as_original()
+
+    assert(a.original_id() >= 0, "an id")
+    assert(a.original_id() != b.original_id(), "a different one each time")
+    assert_eq(a.union(b.translate(2.0, 0.0, 0.0)).original_id(), -1, "a product is no original")
+
+    val first = reserve_ids(3)
+
+    assert_eq(reserve_ids(1), first + 3, "three were set aside")
+
+// -- Rays -------------------------------------------------------------------------------------------
+
+@test
+a_ray_through_a_box_hits_both_faces() =
+    val hits = cube(2.0, 2.0, 2.0, center = true).ray_cast(Vec3(-5.0, 0.1, 0.2), Vec3(5.0, 0.1, 0.2))
+
+    assert_eq(hits.len(), 2, "in and out")
+
+    val first = hits.at(0)
+
+    assert_vec3(first.position, -1.0, 0.1, 0.2, "entering at x = -1")
+    assert_vec3(first.normal, -1.0, 0.0, 0.0, "facing back along the ray")
+    assert_vec3(hits.at(1).position, 1.0, 0.1, 0.2, "leaving at x = 1")
+    assert(first.distance < hits.at(1).distance, "nearest first")
+
+    assert_eq(cube(1.0, 1.0, 1.0).ray_cast(Vec3(5.0, 5.0, 5.0), Vec3(6.0, 6.0, 6.0)).len(), 0, "a miss")
+
+// -- Meshes in and out ------------------------------------------------------------------------------
+
+@test
+a_mesh_round_trips_its_counts() =
+    val mesh = cube(1.0, 2.0, 3.0).to_mesh()
+
+    assert_eq(mesh.num_prop(), 3, "positions only")
+    assert_eq(mesh.num_vert(), 8, "eight vertices")
+    assert_eq(mesh.num_tri(), 12, "twelve triangles")
+    assert_eq(mesh.vert_properties().len(), 24, "3 x 8 floats")
+    assert_eq(mesh.tri_verts().len(), 36, "3 x 12 indices")
+    assert_eq(mesh.num_run(), 1, "one original")
+    assert_eq(mesh.run_index().len(), 2, "a run's start and end")
+
+    val back = of_mesh(mesh).expect("a cube's mesh is a solid")
+
+    assert_near(back.volume(), 6.0, 1e-6, "the same solid")
+    assert_eq(back.num_tri(), 12, "the same triangles")
+
+// A tetrahedron built from sysl data: the corner one, volume 1/6.
+@test
+a_mesh_built_from_sysl_data_is_a_solid() =
+    val mesh = mesh(3, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]).expect("a mesh")
+    val t = of_mesh(mesh).expect("a closed tetrahedron")
+
+    assert_near(t.volume(), 1.0 / 6.0, 1e-6, "corner tetrahedron")
+    assert_eq(t.genus(), 0, "a ball")
+
+    // Inside out is still a manifold, with negative volume refused: Manifold reports it as is.
+    val tris = t.to_mesh().tri_verts()
+
+    assert_eq(tris.len(), 12, "four triangles out")
+
+@test
+a_mesh_that_is_not_closed_is_refused() =
+    val open = mesh(3, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    [0, 2, 1, 0, 1, 3, 0, 3, 2]).expect("a mesh")
+
+    assert_eq(of_mesh(open).unwrap_err(), Status.NotManifold, "a face missing")
+
+    val out_of_range = mesh(3, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                            [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 7]).expect("a mesh")
+
+    assert_eq(of_mesh(out_of_range).unwrap_err(), Status.VertexIndexOutOfBounds, "vertex 7 of 4")
+
+    val nan: f32 = 0.0 / 0.0
+    val not_finite = mesh(3, [nan, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                          [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]).expect("a mesh")
+
+    assert_eq(of_mesh(not_finite).unwrap_err(), Status.NonFiniteVertex, "a NaN position")
+
+@test
+arrays_that_cannot_be_a_mesh_are_refused_before_c_sees_them() =
+    assert_eq(mesh(2, [0.0, 0.0], [0, 0, 0]).unwrap_err(), Status.MissingPositionProperties, "two properties")
+    assert_eq(mesh(3, [0.0, 0.0, 0.0, 1.0], [0, 0, 0]).unwrap_err(), Status.PropertiesWrongLength, "four floats")
+    assert_eq(mesh(3, [0.0, 0.0, 0.0], [0, 0]).unwrap_err(), Status.NotManifold, "two indices")
+    assert_eq(mesh64(0, [0.0, 0.0, 0.0], [0, 0, 0]).unwrap_err(), Status.MissingPositionProperties, "zero properties, no division")
+    assert_eq(mesh64(4, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0, 0, 0]).unwrap_err(), Status.PropertiesWrongLength, "1.5 vertices")
+
+    val none: []const u32 = []
+    val tangents: []const f32 = []
+
+    assert_eq(mesh_with_options(3, [0.0, 0.0, 0.0], [0, 0, 0],
+                                MeshOptions(none, none, [0], none, tangents)).unwrap_err(),
+              Status.MergeVectorsDifferentLengths, "a merge with no partner")
+    assert_eq(mesh_with_options(3, [0.0, 0.0, 0.0], [0, 0, 0],
+                                MeshOptions(none, none, none, none, [1.0, 2.0])).unwrap_err(),
+              Status.InvalidTangents, "two tangent floats for one triangle")
+
+// A mesh with its seams split carries merge vectors, and those are what close it again.
+@test
+merge_vectors_close_a_split_mesh() =
+    val split = cube(1.0, 1.0, 1.0).calculate_normals(0).to_mesh_with_normals(0)
+
+    assert_eq(split.num_vert(), 24, "split")
+    assert_eq(split.merge_from_vert().len(), split.merge_to_vert().len(), "paired")
+    assert(split.merge_from_vert().len() > 0, "the seams are recorded")
+    assert_near(of_mesh(split).expect("the merge vectors close it").volume(), 1.0, 1e-6, "the cube")
+
+    // With the vectors dropped, the same triangles are an open mesh.
+    val bare = mesh(split.num_prop(), split.vert_properties().view(), split.tri_verts().view()).expect("a mesh")
+
+    assert_eq(of_mesh(bare).unwrap_err(), Status.NotManifold, "no merge vectors, no solid")
+    assert_near(of_mesh(bare.merge()).expect("merge() finds the seams").volume(), 1.0, 1e-6, "merged")
+
+    // And handed back explicitly, through the options.
+    val none: []const u32 = []
+    val tangents: []const f32 = []
+    val opts = MeshOptions(none, none, split.merge_from_vert().view(), split.merge_to_vert().view(), tangents)
+    val again = mesh_with_options(split.num_prop(), split.vert_properties().view(), split.tri_verts().view(), opts).expect("a mesh")
+
+    assert_near(of_mesh(again).expect("closed by the options").volume(), 1.0, 1e-6, "the cube again")
+
+@test
+the_double_precision_mesh_round_trips() =
+    val mesh = cube(1.0, 2.0, 3.0).to_mesh64()
+
+    assert_eq(mesh.num_vert(), 8, "eight")
+    assert_eq(mesh.vert_properties().len(), 24, "3 x 8 doubles")
+    assert_eq(mesh.tri_verts().len(), 36, "3 x 12")
+    assert_near(of_mesh64(mesh).expect("a solid").volume(), 6.0, 1e-12, "exact in f64")
+
+    val built = mesh64(3, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                       [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]).expect("a mesh")
+
+    assert_near(of_mesh64(built).expect("closed").volume(), 1.0 / 6.0, 1e-12, "corner tetrahedron")
+
+@test
+a_smooth_mesh_refines_to_a_curve() =
+    val mesh = tetrahedron().to_mesh()
+    val round = smooth(mesh).expect("smoothed").refine(8)
+
+    assert_eq(round.status(), Status.NoError, "valid")
+    assert(!near(round.volume(), tetrahedron().volume(), 1e-3), s"the faces curved: ${round.volume()}")
+
+    // Sharpening the edges of one face changes the curve, so the two arrays reach Manifold.
+    val edges: []const usize = [0, 1, 2]
+    val sharp: []const f64 = [0.0, 0.0, 0.0]
+    val creased = smooth(mesh, edges, sharp).expect("creased")
+
+    assert_near(creased.volume(), tetrahedron().volume(), 1e-9, "unrefined, still the flat solid")
+    assert(!near(creased.refine(8).volume(), round.volume(), 1e-3), "a crease is not the fully smooth curve")
+    assert_eq(smooth(mesh, edges, [0.0]).unwrap_err(), Status.InvalidConstruction, "lengths differ")
+
+// Every array a mesh carries comes out at the length its count says.
+@test
+every_mesh_array_has_its_documented_length() =
+    val two = cube(1.0, 1.0, 1.0).as_original().union(cube(1.0, 1.0, 1.0).as_original().translate(3.0, 0.0, 0.0))
+
+    val mesh = two.to_mesh()
+
+    assert_eq(mesh.num_run(), 2, "two originals, two runs")
+    assert_eq(mesh.run_original_id().len(), 2, "an id a run")
+    assert_eq(mesh.run_index().len(), 3, "run starts and the end")
+    assert_eq(mesh.run_index().at(2), u32(mesh.tri_verts().len()), "the last run ends at the end")
+    assert_eq(mesh.run_transform().len(), 24, "twelve floats a run")
+    assert_eq(mesh.face_id().len(), mesh.num_tri(), "a face id a triangle")
+    val tl = mesh.halfedge_tangent().len()
+
+    assert(tl == 0 || tl == 12 * mesh.num_tri(), "none, or four floats a halfedge")
+    assert_eq(mesh.run_flags().len(), mesh.num_run(), "a flag a run")
+    assert(!mesh.backside(0) && !mesh.has_normals(0), "plain runs")
+    assert(mesh.tolerance() > 0.0,"a tolerance")
+
+    val m64 = two.to_mesh64()
+
+    assert_eq(m64.num_run(), 2, "64: two runs")
+    assert_eq(m64.run_original_id().len(), 2, "64: ids")
+    assert_eq(m64.run_index().len(), 3, "64: run index")
+    assert_eq(m64.run_transform().len(), 24, "64: transforms")
+    assert_eq(m64.face_id().len(), m64.num_tri(), "64: face ids")
+    val tl64 = m64.halfedge_tangent().len()
+
+    assert(tl64 == 0 || tl64 == 12 * m64.num_tri(), "64: none, or four a halfedge")
+    assert_eq(m64.run_flags().len(), 2, "64: flags")
+    assert(!m64.backside(1) && !m64.has_normals(1), "64: plain runs")
+    assert(m64.tolerance() > 0.0, "64: a tolerance")
+    assert_eq(m64.merge().num_tri(), m64.num_tri(), "64: merge keeps the triangles")
+
+    // A smoothed solid's mesh carries a tangent for every halfedge.
+    val tangents = smooth(tetrahedron().to_mesh()).expect("smoothed").to_mesh().halfedge_tangent()
+
+    assert_eq(tangents.len(), 4 * 3 * 4, "four floats a halfedge")
+
+@test
+the_double_precision_mesh_takes_options_and_smooths() =
+    val split = cube(1.0, 1.0, 1.0).calculate_normals(0).to_mesh64_with_normals(0)
+
+    assert_eq(split.num_vert(), 24, "split")
+
+    val none: []const u64 = []
+    val ids: []const u32 = []
+    val tangents: []const f64 = []
+    val opts = MeshOptions64(none, ids, split.merge_from_vert().view(), split.merge_to_vert().view(), tangents)
+    val again = mesh64_with_options(split.num_prop(), split.vert_properties().view(), split.tri_verts().view(), opts).expect("a mesh")
+
+    assert_near(of_mesh64(again).expect("closed by the options").volume(), 1.0, 1e-9, "the cube")
+    assert_eq(mesh64_with_options(3, [0.0, 0.0, 0.0], [0, 0, 0], MeshOptions64(none, ids, [0], none, tangents)).unwrap_err(),
+              Status.MergeVectorsDifferentLengths, "unpaired")
+
+    val round = smooth64(tetrahedron().to_mesh64()).expect("smoothed").refine(8)
+
+    assert(!near(round.volume(), tetrahedron().volume(), 1e-3), "curved")
+    assert(tetrahedron().refine_to_tolerance(0.01).num_tri() >= 4, "to a tolerance")
+    assert(cube(1.0, 1.0, 1.0).epsilon() > 0.0, "an epsilon")
+
+// -- OBJ --------------------------------------------------------------------------------------------
+
+@test
+obj_text_round_trips() =
+    val text = cube(1.0, 2.0, 3.0).to_obj()
+
+    assert(text.starts_with("v ") || text.contains("\nv "), "vertex lines")
+    assert(text.contains("\nf "), "face lines")
+    assert_near(read_obj(text).expect("its own output").volume(), 6.0, 1e-6, "the same solid")
+
+    val mesh = read_obj_mesh(text).expect("a mesh")
+
+    assert_eq(mesh.num_tri(), 12, "twelve triangles")
+    assert(mesh.to_obj().contains("\nf "), "the mesh writes too")
+
+@test
+obj_text_with_no_solid_is_refused() =
+    assert(read_obj("this is not an obj file\n").is_err(), "garbage")
+    assert(read_obj_mesh("").is_none(), "nothing")
+
+// -- Level sets -------------------------------------------------------------------------------------
+
+@test
+a_level_set_of_a_sphere_converges_to_its_volume() =
+    val r = 1.0
+    val exact = 4.0 / 3.0 * PI * r * r * r
+    val ball = level_set(p -> r - (p.x * p.x + p.y * p.y + p.z * p.z).sqrt(),
+                         box(Vec3(-1.5, -1.5, -1.5), Vec3(1.5, 1.5, 1.5)), 0.05)
+
+    assert_eq(ball.status(), Status.NoError, "valid")
+    assert_eq(ball.genus(), 0, "a ball")
+    assert_near(ball.volume(), exact, exact * 0.01, "within 1%")
+
+    // `level` moves the surface: the 0.5 level of the same field is a ball of radius 0.5.
+    val small = level_set(p -> r - (p.x * p.x + p.y * p.y + p.z * p.z).sqrt(),
+                          box(Vec3(-1.5, -1.5, -1.5), Vec3(1.5, 1.5, 1.5)), 0.05, level = 0.5)
+
+    assert_near(small.volume(), exact / 8.0, exact / 8.0 * 0.02, "radius 0.5")
+
+    // Through a cancelled context, nothing is sampled.
+    val ctx = context()
+
+    ctx.cancel()
+    assert_eq(level_set(p -> 1.0 - p.x * p.x, box(Vec3(-1.0, -1.0, -1.0), Vec3(1.0, 1.0, 1.0)), 0.1, ctx = Some(ctx)).status(),
+              Status.Cancelled, "cancelled")
+    assert_eq(smooth(tetrahedron().to_mesh(), ctx = Some(ctx)).unwrap_err(), Status.Cancelled, "a cancelled smooth")
+
+// -- Execution contexts -----------------------------------------------------------------------------
+
+@test
+a_cancelled_context_cancels() =
+    val ctx = context()
+
+    assert(!ctx.cancelled(), "fresh")
+    ctx.cancel()
+    assert(ctx.cancelled(), "sticky")
+
+    val work = sphere(1.0, 64).union(sphere(1.0, 64).translate(0.5, 0.0, 0.0))
+
+    assert_eq(work.with_context(ctx).status(), Status.Cancelled, "a cancelled evaluation")
+    assert_eq(of_mesh(cube(1.0, 1.0, 1.0).to_mesh(), Some(ctx)).unwrap_err(), Status.Cancelled, "a cancelled ingest")
+
+@test
+an_uncancelled_context_reports_completion() =
+    val ctx = context()
+    val work = sphere(1.0, 32).union(sphere(1.0, 32).translate(0.5, 0.0, 0.0)).with_context(ctx)
+
+    assert_eq(work.status(), Status.NoError, "evaluated")
+    assert_near(ctx.progress(), 1.0, 1e-9, "done")
+    assert_near(of_mesh(cube(1.0, 1.0, 1.0).to_mesh(), Some(ctx)).expect("ingested").volume(), 1.0, 1e-6, "through a context")
+
+// -- Cross sections ---------------------------------------------------------------------------------
+
+@test
+a_square_and_a_circle_have_their_areas() =
+    assert_near(square(2.0, 3.0).area(), 6.0, 1e-9, "2 x 3")
+    assert_eq(square(2.0, 3.0).num_vert(), 4, "four corners")
+    assert_near(square(2.0, 2.0, center = true).bounds().min().x, -1.0, 1e-9, "centred")
+
+    val exact = PI * 1.5 * 1.5
+
+    assert_near(circle(1.5, 512).area(), exact, exact * 1e-4, "a circle")
+    assert_eq(circle(1.5, 7).num_vert(), 7, "seven segments")
+
+@test
+cross_section_booleans_combine_by_their_overlap() =
+    val a = square(1.0, 1.0)
+    val b = square(1.0, 1.0).translate(0.25, 0.0)
+
+    assert_near(a.union(b).area(), 1.25, 1e-9, "union")
+    assert_near(a.intersection(b).area(), 0.75, 1e-9, "intersection")
+    assert_near(a.difference(b).area(), 0.25, 1e-9, "difference")
+    assert_near(a.boolean(b, Op.Add).area(), 1.25, 1e-9, "Op.Add")
+    assert_near(a.boolean(b, Op.Subtract).area(), 0.25, 1e-9, "Op.Subtract")
+    assert_near(a.boolean(b, Op.Intersect).area(), 0.75, 1e-9, "Op.Intersect")
+    assert_near(batch_sections([a, b], Op.Add).area(), 1.25, 1e-9, "batch")
+    assert_near(batch_sections([a, b], Op.Subtract).area(), 0.25, 1e-9, "batch difference")
+    assert_near(batch_sections([a, b], Op.Intersect).area(), 0.75, 1e-9, "batch intersection")
+
+@test
+a_hole_is_a_second_contour() =
+    val frame = square(3.0, 3.0).difference(square(1.0, 1.0).translate(1.0, 1.0))
+
+    assert_near(frame.area(), 8.0, 1e-9, "9 - 1")
+    assert_eq(frame.num_contour(), 2, "outside and hole")
+    assert_eq(frame.decompose().len(), 1, "one region")
+    assert_eq(frame.to_polygons().len(), 2, "two contours out")
+
+    val two = square(1.0, 1.0).union(square(1.0, 1.0).translate(3.0, 0.0))
+
+    assert_eq(two.decompose().len(), 2, "two regions")
+    assert_near(compose_sections(two.decompose().view()).area(), 2.0, 1e-9, "composed back")
+
+// Two counter-clockwise unit squares overlapping by half, handed in as raw contours: the fill rule is
+// all that decides the area, so each rule has its own answer.
+@test
+the_fill_rule_decides_what_is_inside() =
+    val a = [Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(1.0, 1.0), Vec2(0.0, 1.0)]
+    val b = [Vec2(0.5, 0.0), Vec2(1.5, 0.0), Vec2(1.5, 1.0), Vec2(0.5, 1.0)]
+    val contours: []const []const Vec2 = [a, b]
+
+    assert_near(cross_section(contours).area(), 1.5, 1e-9, "Positive, the default")
+    assert_near(cross_section(contours, FillRule.NonZero).area(), 1.5, 1e-9, "NonZero")
+    assert_near(cross_section(contours, FillRule.EvenOdd).area(), 1.0, 1e-9, "EvenOdd drops the overlap")
+    assert_near(cross_section(contours, FillRule.Negative).area(), 0.0, 1e-9, "Negative: nothing is clockwise")
+
+@test
+an_offset_turns_corners_by_its_join() =
+    val sq = square(1.0, 1.0)
+
+    assert_near(sq.offset(1.0, JoinType.Miter, 10.0).area(), 9.0, 1e-9, "mitred: a 3 x 3 square")
+
+    val round = 1.0 + 4.0 + PI
+
+    assert_near(sq.offset(1.0, JoinType.Round, segments = 256).area(), round, round * 1e-3, "rounded corners")
+    assert(sq.offset(1.0, JoinType.Square).area() < 9.0, "squared corners are cut")
+    assert(sq.offset(1.0, JoinType.Bevel).area() < sq.offset(1.0, JoinType.Square).area(), "a bevel cuts more")
+    assert_near(square(4.0, 4.0).offset(-1.0, JoinType.Miter).area(), 4.0, 1e-9, "shrinking")
+
+@test
+cross_section_transforms() =
+    val r = square(1.0, 2.0)
+
+    assert_near(r.rotate(90.0).bounds().dimensions().x, 2.0, 1e-9, "a quarter turn")
+    assert_near(r.scale(3.0, 1.0).area(), 6.0, 1e-9, "scale")
+    assert_near(r.mirror(1.0, 0.0).bounds().min().x, -1.0, 1e-9, "mirror")
+    assert_near(r.transform(Vec2(2.0, 0.0), Vec2(0.0, 1.0), Vec2(5.0, 0.0)).bounds().min().x, 5.0, 1e-9, "matrix")
+    assert_near(r.warp(p -> Vec2(p.x * 3.0, p.y)).area(), 6.0, 1e-9, "warp")
+    assert_near(r.hull().area(), 2.0, 1e-9, "a rectangle is its own hull")
+    assert_near(hull_of_points([Vec2(0.0, 0.0), Vec2(2.0, 0.0), Vec2(0.0, 2.0), Vec2(0.5, 0.5)]).area(), 2.0, 1e-9, "a triangle's hull")
+    assert_near(batch_hull_sections([square(1.0, 1.0), square(1.0, 1.0).translate(2.0, 0.0)]).area(), 3.0, 1e-9, "batch hull")
+    assert(empty_section().is_empty(), "empty")
+
+@test
+simplify_drops_collinear_points() =
+    val zigzag = cross_section([[Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(2.0, 1e-9), Vec2(3.0, 0.0), Vec2(3.0, 1.0), Vec2(0.0, 1.0)]])
+
+    assert_eq(zigzag.num_vert(), 6, "as given")
+    assert_eq(zigzag.simplify(1e-6).num_vert(), 4, "a rectangle")
+
+// -- 2D to 3D and back ------------------------------------------------------------------------------
+
+@test
+an_extrusion_is_area_times_height() =
+    val prism = square(2.0, 3.0).extrude(4.0)
+
+    assert_near(prism.volume(), 24.0, 1e-9, "6 x 4")
+    assert_near(square(2.0, 3.0).extrude(4.0, scale_x = 0.0, scale_y = 0.0).volume(), 8.0, 1e-9, "a pyramid: a third")
+    // A twisted square's sides are triangulated between the turned slices, so the volume is near the
+    // untwisted prism's rather than equal to it — and the top face has turned by the full twist.
+    val twisted = square(2.0, 2.0, center = true).extrude(1.0, 16, 45.0)
+
+    assert_near(twisted.volume(), 4.0, 0.2, "a twist roughly keeps volume")
+    assert_near(twisted.bounding_box().dimensions().x, 2.0 * 2.0.sqrt(), 1e-9, "the top's corners on the axes")
+
+    val frame = square(3.0, 3.0).difference(square(1.0, 1.0).translate(1.0, 1.0)).extrude(2.0)
+
+    assert_near(frame.volume(), 16.0, 1e-9, "a frame")
+    assert_eq(frame.genus(), 1, "with a hole through")
+
+// Pappus: a region revolved about an axis sweeps its area times the distance its centroid travels.
+@test
+a_revolution_follows_pappus() =
+    val ring = square(1.0, 1.0).translate(1.0, 0.0).revolve(512)
+    val exact = 1.0 * 2.0 * PI * 1.5
+
+    assert_near(ring.volume(), exact, exact * 1e-3, "a square ring")
+    assert_eq(ring.genus(), 1, "a torus")
+
+    val half = square(1.0, 1.0).translate(1.0, 0.0).revolve(512, 180.0)
+
+    assert_near(half.volume(), exact / 2.0, exact * 1e-3, "half a turn")
+
+@test
+a_slice_of_a_box_is_its_face() =
+    val b = cube(2.0, 3.0, 4.0)
+    val cut = b.slice(1.0)
+
+    assert_eq(cut.num_contour(), 1, "one contour")
+    // The cut crosses each side face's diagonal, so the raw contour carries collinear points.
+    assert_eq(cut.simplify().num_vert(), 4, "a rectangle")
+    assert_near(cut.area(), 6.0, 1e-9, "2 x 3")
+    assert_near(b.project().area(), 6.0, 1e-9, "its shadow")
+    assert(b.slice(10.0).is_empty(), "above it, nothing")
+
+    // A slice through a drilled block has the hole in it.
+    val drilled = b.difference(cylinder(4.0, 0.5, 0.5, 32).translate(1.0, 1.5, 0.0))
+
+    assert_eq(drilled.slice(2.0).num_contour(), 2, "outside and hole")
+
+@test
+a_square_triangulates_into_two() =
+    val tris = triangulate([[Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(1.0, 1.0), Vec2(0.0, 1.0)]])
+
+    assert_eq(tris.len(), 6, "two triangles")
+
+    for i in tris.view()
+        assert(i >= 0 && i < 4, "an index into the four points")
+
+    // With a hole, the indices run on into the second contour's points.
+    val framed = triangulate([[Vec2(0.0, 0.0), Vec2(3.0, 0.0), Vec2(3.0, 3.0), Vec2(0.0, 3.0)],
+                              [Vec2(1.0, 1.0), Vec2(1.0, 2.0), Vec2(2.0, 2.0), Vec2(2.0, 1.0)]])
+
+    assert_eq(framed.len(), 8 * 3, "eight triangles around a hole")
+
+// -- Bounds -----------------------------------------------------------------------------------------
+
+@test
+a_box_answers_containment_and_grows() =
+    val b = box(Vec3(0.0, 0.0, 0.0), Vec3(1.0, 2.0, 3.0))
+
+    assert(b.contains(Vec3(0.5, 1.0, 1.5)), "inside")
+    assert(!b.contains(Vec3(2.0, 0.0, 0.0)), "outside")
+    assert_near(b.scale(), 3.0, 1e-12, "largest coordinate")
+    assert(b.is_finite(), "finite")
+
+    b.include(Vec3(5.0, -1.0, 0.0))
+    assert_vec3(b.min(), 0.0, -1.0, 0.0, "grown down")
+    assert_vec3(b.max(), 5.0, 2.0, 3.0, "and out")
+
+    val other = box(Vec3(10.0, 10.0, 10.0), Vec3(11.0, 11.0, 11.0))
+
+    assert(!b.overlaps_box(other), "apart")
+    assert_vec3(b.union(other).max(), 11.0, 11.0, 11.0, "union")
+    assert(b.union(other).contains_box(other), "contains")
+    assert_vec3(other.translate(1.0, 2.0, 3.0).min(), 11.0, 12.0, 13.0, "translate")
+    assert_vec3(other.scaled(2.0, 2.0, 2.0).max(), 22.0, 22.0, 22.0, "scaled")
+    assert_vec3(other.transform(Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0), Vec3(-10.0, 0.0, 0.0)).min(),
+                0.0, 10.0, 10.0, "transform")
+    assert(b.overlaps(Vec3(1.0, 1.0, 1.0)), "a point overlaps")
+
+@test
+a_rect_answers_containment_and_grows() =
+    val r = rect(Vec2(0.0, 0.0), Vec2(2.0, 1.0))
+
+    assert(r.contains(Vec2(1.0, 0.5)), "inside")
+    assert(!r.is_empty(), "not empty")
+    assert(r.is_finite(), "finite")
+    assert_near(r.center().x, 1.0, 1e-12, "center")
+    assert_near(r.dimensions().y, 1.0, 1e-12, "dimensions")
+
+    r.include(Vec2(-1.0, 3.0))
+    assert_near(r.min().x, -1.0, 1e-12, "grown")
+    assert_near(r.max().y, 3.0, 1e-12, "grown up")
+    assert_near(r.scale(), 3.0, 1e-12, "largest coordinate")
+
+    val far = rect(Vec2(10.0, 10.0), Vec2(11.0, 11.0))
+
+    assert(!r.overlaps_rect(far), "apart")
+    assert(r.union(far).contains_rect(far), "union contains")
+    assert_near(far.translate(1.0, 0.0).min().x, 11.0, 1e-12, "translate")
+    assert_near(far.scaled(2.0, 2.0).max().x, 22.0, 1e-12, "scaled")
+    // Only the two corners are carried through the map, so it is for axis-aligned maps: x doubled,
+    // y tripled, moved by (1, 1).
+    val moved = far.transform(Vec2(2.0, 0.0), Vec2(0.0, 3.0), Vec2(1.0, 1.0))
+
+    assert_near(moved.min().x, 21.0, 1e-12, "x scaled and moved")
+    assert_near(moved.max().y, 34.0, 1e-12, "y scaled and moved")
+
+// The README's example, so what it prints is what the binding does.
+@test
+the_readme_example_says_what_it_prints() =
+    val block = cube(20.0, 20.0, 10.0, center = true)
+    val drilled = block.difference(cylinder(12.0, 4.0, 4.0, 64, center = true))
+
+    // A 64-gon of circumradius 4 has area 32 · 16 · sin(2π/64); the hole is 10 deep.
+    val hole = 10.0 * 32.0 * 16.0 * (2.0 * PI / 64.0).sin()
+
+    assert_near(drilled.volume(), 4000.0 - hole, 1e-6, "the block less the hole")
+    assert_near(drilled.volume(), 3498.15, 0.01, "as the README prints it")
+    assert_eq(drilled.genus(), 1, "the hole is a handle")
+
+    val bracket = square(30.0, 10.0).difference(square(10.0, 6.0).translate(10.0, 4.0)).extrude(5.0)
+
+    assert_near(bracket.volume(), 1200.0, 1e-9, "the bracket")
+
+// -- Status -----------------------------------------------------------------------------------------
+
+@test
+a_status_code_reads_back_and_describes_itself() =
+    assert_eq(Status.of(0), Status.NoError, "0")
+    assert_eq(Status.of(2), Status.NotManifold, "2")
+    assert_eq(Status.of(14), Status.Cancelled, "14")
+    assert_eq(Status.of(99), Status.Unknown, "a code from a newer Manifold")
+    assert(Status.NoError.ok(), "ok")
+    assert(!Status.NotManifold.ok(), "not ok")
+    assert_eq(Status.NotManifold.describe(), "the mesh is not manifold", "a sentence")
+
+// -- The global quality setting ---------------------------------------------------------------------
+
+// The only test that touches the process-wide setting, and it puts it back.
+@test
+the_global_circle_quality_applies_where_segments_is_zero() =
+    set_circular_segments(12)
+    assert_eq(circular_segments(5.0), 12, "fixed")
+    assert_eq(circle(1.0).num_vert(), 12, "a circle made with 0 segments")
+    assert_eq(sphere(1.0).num_vert() > 0, true, "a sphere too")
+    reset_to_circular_defaults()
+
+    val coarse = circular_segments(10.0)
+
+    set_min_circular_angle(1.0)
+    assert(circular_segments(10.0) > coarse, "a smaller angle means more segments")
+    reset_to_circular_defaults()
+    set_min_circular_edge_length(0.01)
+    assert(circular_segments(10.0) >= coarse, "a shorter edge never means fewer")
+    reset_to_circular_defaults()

@@ -1,0 +1,61 @@
+module sh.sysl.manifold
+
+import sh.sysl.manifold.c
+import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
+import sysl.slices.{as_ptr, as_mut_ptr}
+
+// Contours cross into Manifold as a `ManifoldPolygons`, a C++ vector of vectors, and come back the
+// same way. On this side they are plain data: a contour is a `[]Vec2`, a set of them a `[][]Vec2`
+// going in and a `Buf[Buf[Vec2]]` coming out, so nothing a program holds points into C storage.
+
+// A `ManifoldPolygons` holding a copy of `contours`. The caller deletes it.
+private[manifold] polygons_of(contours: []const []const Vec2) -> *c.Polygons
+    var simples: Buf[*c.SimplePolygon] = buf()
+
+    for contour in contours
+        simples.push(c.simple_polygon(ptr_cast(c.alloc_simple_polygon()), as_ptr(contour), contour.len))
+
+    // `manifold_polygons` copies each simple polygon, so they are freed straight after.
+    val ps = c.polygons(ptr_cast(c.alloc_polygons()), as_mut_ptr(simples.view()), simples.len())
+
+    for s in simples.view()
+        c.delete_simple_polygon(s)
+
+    ps
+end polygons_of
+
+// The contours of `ps` copied out, and `ps` deleted.
+private[manifold] take_polygons(ps: *c.Polygons) -> Buf[Buf[Vec2]]
+    var out: Buf[Buf[Vec2]] = buf()
+
+    for i in 0..<c.polygons_length(ps)
+        var contour: Buf[Vec2] = buf()
+
+        for j in 0..<c.polygons_simple_length(ps, i)
+            contour.push(c.polygons_get_point(ps, i, j))
+
+        out.push(contour)
+
+    c.delete_polygons(ps)
+    out
+end take_polygons
+
+// Triangles covering `contours` under the positive fill rule, as indices into the contours' points
+// taken in order (the first contour's points, then the second's, and so on), three per triangle.
+// `epsilon` is the precision; a negative one lets Manifold choose.
+triangulate(contours: []const []const Vec2, epsilon: f64 = -1.0) -> Buf[i32]
+    val ps = polygons_of(contours)
+    val t = c.triangulate(ptr_cast(c.alloc_triangulation()), ps, epsilon)
+
+    c.delete_polygons(ps)
+
+    var out: Buf[i32] = buf()
+    val n = c.triangulation_num_tri(t) * 3
+
+    out.reserve(n)
+    c.triangulation_tri_verts(ptr_cast(as_mut_ptr(out.spare())), t)
+    out.set_len(n)
+    c.delete_triangulation(t)
+    out
+end triangulate

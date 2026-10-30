@@ -1,0 +1,359 @@
+module sh.sysl.manifold
+
+import sh.sysl.manifold.c
+import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
+import sysl.slices.{as_ptr, as_mut_ptr}
+import sysl.text.{cstring, from_cstring}
+
+// A mesh as a GPU wants it: `num_prop` floats per vertex (the first three the position, the rest
+// whatever the program attached: normals, UVs, colours), and three vertex indices per triangle. It is
+// how a solid gets in (`of_mesh`) and out (`Manifold.to_mesh`).
+//
+// Every accessor answers a fresh copy, so a `Buf` from one outlives the mesh.
+struct MeshGL
+    handle: *c.MeshGL
+
+    num_prop(&self) -> usize = c.meshgl_num_prop(self.handle)
+    num_vert(&self) -> usize = c.meshgl_num_vert(self.handle)
+    num_tri(&self) -> usize = c.meshgl_num_tri(self.handle)
+    num_run(&self) -> usize = c.meshgl_num_run(self.handle)
+    tolerance(&self) -> f32 = c.meshgl_tolerance(self.handle)
+
+    // `num_prop` floats per vertex.
+    vert_properties(&self) -> Buf[f32]
+        val n = c.meshgl_vert_properties_length(self.handle)
+        val out: Buf[f32] = room(n)
+
+        c.meshgl_vert_properties(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end vert_properties
+
+    // Three vertex indices per triangle, counter-clockwise seen from outside.
+    tri_verts(&self) -> Buf[u32]
+        val n = c.meshgl_tri_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl_tri_verts(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end tri_verts
+
+    // Vertex `merge_from_vert[i]` is the same point as `merge_to_vert[i]`, split for a property seam.
+    merge_from_vert(&self) -> Buf[u32]
+        val n = c.meshgl_merge_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl_merge_from_vert(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end merge_from_vert
+
+    merge_to_vert(&self) -> Buf[u32]
+        val n = c.meshgl_merge_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl_merge_to_vert(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end merge_to_vert
+
+    // Where each run of triangles from one original mesh starts in `tri_verts`, and its end.
+    run_index(&self) -> Buf[u32]
+        val n = c.meshgl_run_index_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl_run_index(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_index
+
+    run_original_id(&self) -> Buf[u32]
+        val n = c.meshgl_run_original_id_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl_run_original_id(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_original_id
+
+    // Twelve floats per run: the 3x4 column-major transform from the original mesh to this one.
+    run_transform(&self) -> Buf[f32]
+        val n = c.meshgl_run_transform_length(self.handle)
+        val out: Buf[f32] = room(n)
+
+        c.meshgl_run_transform(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_transform
+
+    face_id(&self) -> Buf[u32]
+        val n = c.meshgl_face_id_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl_face_id(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end face_id
+
+    // Four floats per halfedge, for smooth meshes; empty when there are none.
+    halfedge_tangent(&self) -> Buf[f32]
+        val n = c.meshgl_tangent_length(self.handle)
+        val out: Buf[f32] = room(n)
+
+        c.meshgl_halfedge_tangent(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end halfedge_tangent
+
+    run_flags(&self) -> Buf[u8]
+        val n = c.meshgl_run_flags_length(self.handle)
+        val out: Buf[u8] = room(n)
+
+        c.meshgl_run_flags(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_flags
+
+    backside(&self, run: usize) -> bool = c.meshgl_backside(self.handle, run) != 0
+    has_normals(&self, run: usize) -> bool = c.meshgl_has_normals(self.handle, run) != 0
+
+    // A copy with coincident vertices on open edges merged, so that a mesh exported with split
+    // seams can be read back as one solid.
+    merge(&self) -> &MeshGL = MeshGL(c.meshgl_merge(ptr_cast(c.alloc_meshgl()), self.handle))
+end MeshGL
+
+impl Drop for MeshGL
+    drop(self) = c.delete_meshgl(self.handle)
+
+// The double-precision mesh: positions and properties as `f64`, indices as `u64`. What `read_obj`
+// answers, and the one to use where `f32` positions would lose precision.
+struct MeshGL64
+    handle: *c.MeshGL64
+
+    num_prop(&self) -> usize = c.meshgl64_num_prop(self.handle)
+    num_vert(&self) -> usize = c.meshgl64_num_vert(self.handle)
+    num_tri(&self) -> usize = c.meshgl64_num_tri(self.handle)
+    num_run(&self) -> usize = c.meshgl64_num_run(self.handle)
+    tolerance(&self) -> f64 = c.meshgl64_tolerance(self.handle)
+
+    vert_properties(&self) -> Buf[f64]
+        val n = c.meshgl64_vert_properties_length(self.handle)
+        val out: Buf[f64] = room(n)
+
+        c.meshgl64_vert_properties(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end vert_properties
+
+    tri_verts(&self) -> Buf[u64]
+        val n = c.meshgl64_tri_length(self.handle)
+        val out: Buf[u64] = room(n)
+
+        c.meshgl64_tri_verts(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end tri_verts
+
+    merge_from_vert(&self) -> Buf[u64]
+        val n = c.meshgl64_merge_length(self.handle)
+        val out: Buf[u64] = room(n)
+
+        c.meshgl64_merge_from_vert(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end merge_from_vert
+
+    merge_to_vert(&self) -> Buf[u64]
+        val n = c.meshgl64_merge_length(self.handle)
+        val out: Buf[u64] = room(n)
+
+        c.meshgl64_merge_to_vert(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end merge_to_vert
+
+    run_index(&self) -> Buf[u64]
+        val n = c.meshgl64_run_index_length(self.handle)
+        val out: Buf[u64] = room(n)
+
+        c.meshgl64_run_index(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_index
+
+    run_original_id(&self) -> Buf[u32]
+        val n = c.meshgl64_run_original_id_length(self.handle)
+        val out: Buf[u32] = room(n)
+
+        c.meshgl64_run_original_id(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_original_id
+
+    run_transform(&self) -> Buf[f64]
+        val n = c.meshgl64_run_transform_length(self.handle)
+        val out: Buf[f64] = room(n)
+
+        c.meshgl64_run_transform(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_transform
+
+    face_id(&self) -> Buf[u64]
+        val n = c.meshgl64_face_id_length(self.handle)
+        val out: Buf[u64] = room(n)
+
+        c.meshgl64_face_id(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end face_id
+
+    halfedge_tangent(&self) -> Buf[f64]
+        val n = c.meshgl64_tangent_length(self.handle)
+        val out: Buf[f64] = room(n)
+
+        c.meshgl64_halfedge_tangent(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end halfedge_tangent
+
+    run_flags(&self) -> Buf[u8]
+        val n = c.meshgl64_run_flags_length(self.handle)
+        val out: Buf[u8] = room(n)
+
+        c.meshgl64_run_flags(spare_of(out), self.handle)
+        out.set_len(n)
+        out
+    end run_flags
+
+    backside(&self, run: usize) -> bool = c.meshgl64_backside(self.handle, run) != 0
+    has_normals(&self, run: usize) -> bool = c.meshgl64_has_normals(self.handle, run) != 0
+
+    merge(&self) -> &MeshGL64 = MeshGL64(c.meshgl64_merge(ptr_cast(c.alloc_meshgl64()), self.handle))
+
+    // The mesh as a Wavefront OBJ document.
+    to_obj(&self) -> string
+        var sink = ObjText("")
+
+        c.meshgl64_write_obj(self.handle, &obj_entry, ptr_cast(&sink))
+        sink.text
+end MeshGL64
+
+impl Drop for MeshGL64
+    drop(self) = c.delete_meshgl64(self.handle)
+
+// -- Building a mesh ------------------------------------------------------------------------------
+
+// The extra arrays a mesh may carry, all optional; an empty slice is "none". `merge_from_vert` and
+// `merge_to_vert` pair up, so they must be the same length; `halfedge_tangent` is four per halfedge,
+// twelve per triangle.
+struct MeshOptions
+    run_index: []const u32
+    run_original_id: []const u32
+    merge_from_vert: []const u32
+    merge_to_vert: []const u32
+    halfedge_tangent: []const f32
+
+// The `f64` mesh's options; `run_original_id` stays `u32`, as Manifold's ids are.
+struct MeshOptions64
+    run_index: []const u64
+    run_original_id: []const u32
+    merge_from_vert: []const u64
+    merge_to_vert: []const u64
+    halfedge_tangent: []const f64
+
+// A mesh holding a copy of `vert_properties` (`num_prop` floats per vertex, at least the three of the
+// position) and `tri_verts` (three indices per triangle). Answers the `Status` Manifold itself would
+// give where the arrays cannot be a mesh at all: fewer than three properties, a property array that
+// is not a whole number of vertices, or a triangle array that is not a whole number of triangles.
+//
+// Whether the triangles make a *solid* is not checked here — that is `of_mesh`'s answer.
+mesh(num_prop: usize, vert_properties: []const f32, tri_verts: []const u32) -> Result[&MeshGL, Status]
+    check_shape(num_prop, vert_properties.len, tri_verts.len)?
+
+    Ok(MeshGL(c.meshgl(ptr_cast(c.alloc_meshgl()), ptr_cast(as_ptr(vert_properties)), vert_properties.len / num_prop,
+                       num_prop, ptr_cast(as_ptr(tri_verts)), tri_verts.len / 3)))
+
+// `mesh`, with the optional arrays of `MeshOptions`.
+mesh_with_options(num_prop: usize, vert_properties: []const f32, tri_verts: []const u32,
+                  options: MeshOptions) -> Result[&MeshGL, Status]
+    check_shape(num_prop, vert_properties.len, tri_verts.len)?
+    check_options(tri_verts.len, options.merge_from_vert.len, options.merge_to_vert.len, options.halfedge_tangent.len)?
+
+    var o = c.MeshGLOptions(ptr_cast(as_ptr(options.run_index)), options.run_index.len,
+                            ptr_cast(as_ptr(options.run_original_id)), options.run_original_id.len,
+                            ptr_cast(as_ptr(options.merge_from_vert)), ptr_cast(as_ptr(options.merge_to_vert)),
+                            options.merge_from_vert.len, ptr_cast(as_ptr(options.halfedge_tangent)))
+
+    Ok(MeshGL(c.meshgl_w_options(ptr_cast(c.alloc_meshgl()), ptr_cast(as_ptr(vert_properties)),
+                                 vert_properties.len / num_prop, num_prop, ptr_cast(as_ptr(tri_verts)),
+                                 tri_verts.len / 3, &o)))
+end mesh_with_options
+
+// The `f64` mesh, under the same rules as `mesh`.
+mesh64(num_prop: usize, vert_properties: []const f64, tri_verts: []const u64) -> Result[&MeshGL64, Status]
+    check_shape(num_prop, vert_properties.len, tri_verts.len)?
+
+    Ok(MeshGL64(c.meshgl64(ptr_cast(c.alloc_meshgl64()), ptr_cast(as_ptr(vert_properties)), vert_properties.len / num_prop,
+                           num_prop, ptr_cast(as_ptr(tri_verts)), tri_verts.len / 3)))
+
+mesh64_with_options(num_prop: usize, vert_properties: []const f64, tri_verts: []const u64,
+                    options: MeshOptions64) -> Result[&MeshGL64, Status]
+    check_shape(num_prop, vert_properties.len, tri_verts.len)?
+    check_options(tri_verts.len, options.merge_from_vert.len, options.merge_to_vert.len, options.halfedge_tangent.len)?
+
+    var o = c.MeshGL64Options(ptr_cast(as_ptr(options.run_index)), options.run_index.len,
+                              ptr_cast(as_ptr(options.run_original_id)), options.run_original_id.len,
+                              ptr_cast(as_ptr(options.merge_from_vert)), ptr_cast(as_ptr(options.merge_to_vert)),
+                              options.merge_from_vert.len, ptr_cast(as_ptr(options.halfedge_tangent)))
+
+    Ok(MeshGL64(c.meshgl64_w_options(ptr_cast(c.alloc_meshgl64()), ptr_cast(as_ptr(vert_properties)),
+                                     vert_properties.len / num_prop, num_prop, ptr_cast(as_ptr(tri_verts)),
+                                     tri_verts.len / 3, &o)))
+end mesh64_with_options
+
+// A Wavefront OBJ document read into a mesh. `None` where Manifold's reader found no mesh in it.
+read_obj_mesh(text: string) -> Option[&MeshGL64]
+    val s = cstring(text)
+    val m = MeshGL64(c.meshgl64_read_obj(ptr_cast(c.alloc_meshgl64()), s.ptr))
+
+    if m.num_tri() == 0 then None else Some(m)
+
+// The C-side arrays are copied by every constructor above, which reads `n_verts * num_prop` and
+// `n_tris * 3` elements — so a length that does not divide would be cut short silently. Refusing it
+// here gives the first two the status Manifold names that defect with. A partial triangle has no
+// status of its own; it is reported as `NotManifold`, since no closed solid has one.
+private check_shape(num_prop: usize, props: usize, tris: usize) -> Result[unit, Status]
+    if num_prop < 3 then return Err(Status.MissingPositionProperties)
+    if props % num_prop != 0 then return Err(Status.PropertiesWrongLength)
+    if tris % 3 != 0 then return Err(Status.NotManifold)
+    Ok(())
+
+private check_options(tris: usize, merge_from: usize, merge_to: usize, tangents: usize) -> Result[unit, Status]
+    if merge_from != merge_to then return Err(Status.MergeVectorsDifferentLengths)
+    if tangents != 0 && tangents != tris * 4 then return Err(Status.InvalidTangents)
+    Ok(())
+
+// -- Copying out ----------------------------------------------------------------------------------
+
+// An empty buffer with room for `n`, for a C function that copies into caller storage.
+private[manifold] room[T: AnyBits](n: usize) -> Buf[T]
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+    out
+
+// Where a C function writing into `out`'s spare room starts — null where there is no room, which
+// Manifold's copies (a `std::copy` of zero elements) never dereference.
+private[manifold] spare_of[T: AnyBits](out: Buf[T]) -> *u8 = ptr_cast(as_mut_ptr(out.spare()))
+
+// The text `write_obj` hands its callback, copied out before the callback returns.
+private[manifold] struct ObjText
+    text: string
+
+private[manifold] obj_entry(text: *u8, ctx: *u8)
+    val sink: *ObjText = ptr_cast(ctx)
+
+    (*sink).text = from_cstring(text).unwrap_or("")
