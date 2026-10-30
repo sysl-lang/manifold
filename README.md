@@ -20,7 +20,7 @@ print(bracket.volume())                              // 1200
 
 ```
 dependencies {
-  manifold { git = "github.com/sysl-lang/manifold", version = "0.1.0" }
+  manifold { git = "github.com/sysl-lang/manifold", version = "0.1.1" }
 }
 ```
 
@@ -36,11 +36,10 @@ That brings `libmanifold` (the C++ library), `libmanifoldc` (its C API, which th
 dependencies, TBB and Clipper2. `sysl test .` needs no flags.
 
 **How the library is found.** The manifest's `pkg_config { manifold }` asks `pkg-config` where the
-library is, and `@link("manifoldc")` names the C wrapper beside it. No header is compiled: Homebrew's
-`manifold.pc` is written for C++ — its `Cflags` carry `-std=c++17`, which clang refuses for C, and sysl
-hands a `.pc`'s `Cflags` to every C compile of a package. So this package declares the C API by hand
-(`sh/sysl/manifold/c/c.sysl`, all 294 functions) and compiles no C at all; the tests pin every record
-layout to what clang measured from `types.h`.
+library and its headers are, and `@link("manifoldc")` names the C wrapper beside it. The raw layer
+(`sh/sysl/manifold/c/c.sysl`, all 294 functions) `@include`s `manifold/manifoldc.h`, takes the four
+enumerations and their values from it with `c type`/`c const`, and `@assert`s every record's size and
+offsets against the C compiler's, so a header that drifts fails the build.
 
 ## What it is
 

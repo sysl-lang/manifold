@@ -25,7 +25,7 @@ No shim is needed and no sysl gap was found.
 | record by value: `ManifoldVec2`, `ManifoldVec3`, `ManifoldRayHit`, `ManifoldManifoldPair` (two handles) | 13 functions return one; 3 callback signatures carry one | `struct`, by value both ways |
 | record by pointer: `ManifoldMeshGLOptions`, `ManifoldMeshGL64Options` | 2 | `struct` of pointers and lengths, built on the stack |
 | unused records: `ManifoldIVec3`, `ManifoldVec4`, `ManifoldProperties` | 0 functions | not declared — nothing takes or answers one |
-| enumeration (`OpType`, `Error`, `FillRule`, `JoinType`) | 8 functions | `i32`; values written as `val`s (see below) |
+| enumeration (`OpType`, `Error`, `FillRule`, `JoinType`) | 8 functions | `c type` and `c const` from the header |
 | array copied **in** (`float *vert_props`, `uint32_t *tri_verts`, `ManifoldVec2 *`, `ManifoldVec3 *`, `size_t *half_edges`, `double *smoothness`) | 13 | `as_ptr` of a `[]const T` |
 | array copied **out** into caller storage (`manifold_meshgl_vert_properties(void *mem, …)` and 20 more) | 21 | a `Buf[T]` reserved to the reported length, its `spare()` handed over, `set_len` after |
 | `char *` in (`manifold_read_obj`) | 2 | `sysl.text.cstring` |
@@ -39,17 +39,5 @@ lives on the calling frame and nothing has to be kept alive afterwards.
 
 ## What forced a decision, though not a gap
 
-- **Homebrew's `manifold.pc` is a C++ file.** Its `Cflags` are `-I… -std=c++17`; sysl passes a `.pc`'s
-  `Cflags` to every C compile of the package, `c const` probes included, and clang refuses
-  `-std=c++17` for C (`error: invalid argument '-std=c++17' not allowed with 'C'`). It also names only
-  `-lmanifold`, not the C wrapper. So the package uses `pkg_config` for the library directory only,
-  names `manifoldc` with `@link`, and compiles no C: no `@include`, no `c const`, no `@assert` against
-  the header. The record layouts (all 8-byte fields) are pinned in `tests.sysl` to what clang measured,
-  and the enumeration values (each a C `enum` counting from 0) are written out and checked by
-  behaviour — a wrong `OpType`, `FillRule` or `JoinType` code changes an area or volume a test asserts,
-  and a wrong `Error` code changes a status a test asserts.
-- **`sysl import-c --follow manifold/types.h`** brought `types.h`'s records across but not its
-  `enum`s ("an enum declared by another header"), so the eight functions taking one were written by
-  hand. Reported as a finding against `import-c`.
 - **`Rect`/`Box` `transform` carry only the two corners** (Manifold's own definition), so they are
   right for axis-aligned maps only; said in the docs and tested with a scale.

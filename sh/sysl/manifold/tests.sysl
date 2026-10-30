@@ -27,21 +27,22 @@ private assert_vec3(got: Vec3, x: f64, y: f64, z: f64, msg: string) =
 
 // -- The layout the two sides have to agree about ---------------------------------------------------
 
-// **This package compiles no C** (see `c/c.sysl`), so no `c const` can measure the records. The
-// numbers are what clang printed for `sizeof`/`offsetof` over `manifold/types.h` 3.5.4 on arm64 and
-// x86-64 alike (every field is 8 bytes wide), and a record that drifted from them reads wrong bytes.
+// `c/c.sysl` declares each record and `@assert`s its size and every offset against what the C compiler
+// measures from `types.h`, so a drifted record fails the build. These say the same thing at run time,
+// so a test goes red if those assertions are ever removed or weakened.
 @test
 the_records_are_laid_out_as_types_h_lays_them_out() =
-    assert_eq(sizeof(c.Vec2), 16, "ManifoldVec2")
-    assert_eq(sizeof(c.Vec3), 24, "ManifoldVec3")
-    assert_eq(sizeof(c.ManifoldPair), 16, "ManifoldManifoldPair")
-    assert_eq(sizeof(c.RayHit), 64, "ManifoldRayHit")
-    assert_eq(offsetof(c.RayHit, distance), 8, "ManifoldRayHit.distance")
-    assert_eq(offsetof(c.RayHit, position), 16, "ManifoldRayHit.position")
-    assert_eq(offsetof(c.RayHit, normal), 40, "ManifoldRayHit.normal")
-    assert_eq(sizeof(c.MeshGLOptions), 64, "ManifoldMeshGLOptions")
-    assert_eq(offsetof(c.MeshGLOptions, halfedge_tangents), 56, "ManifoldMeshGLOptions.halfedge_tangents")
-    assert_eq(sizeof(c.MeshGL64Options), 64, "ManifoldMeshGL64Options")
+    assert_eq(sizeof(c.Vec2), c.SIZEOF_VEC2, "ManifoldVec2")
+    assert_eq(sizeof(c.Vec3), c.SIZEOF_VEC3, "ManifoldVec3")
+    assert_eq(sizeof(c.ManifoldPair), c.SIZEOF_MANIFOLD_PAIR, "ManifoldManifoldPair")
+    assert_eq(sizeof(c.RayHit), c.SIZEOF_RAY_HIT, "ManifoldRayHit")
+    assert_eq(offsetof(c.RayHit, distance), c.OFFSETOF_RAY_HIT_DISTANCE, "ManifoldRayHit.distance")
+    assert_eq(offsetof(c.RayHit, position), c.OFFSETOF_RAY_HIT_POSITION, "ManifoldRayHit.position")
+    assert_eq(offsetof(c.RayHit, normal), c.OFFSETOF_RAY_HIT_NORMAL, "ManifoldRayHit.normal")
+    assert_eq(sizeof(c.MeshGLOptions), c.SIZEOF_MESH_GL_OPTIONS, "ManifoldMeshGLOptions")
+    assert_eq(offsetof(c.MeshGLOptions, halfedge_tangents), c.OFFSETOF_MESH_GL_OPTIONS_HALFEDGE_TANGENTS, "ManifoldMeshGLOptions.halfedge_tangents")
+    assert_eq(sizeof(c.MeshGL64Options), c.SIZEOF_MESH_GL64_OPTIONS, "ManifoldMeshGL64Options")
+    assert_eq(sizeof(c.Vec3), 24, "ManifoldVec3 is three doubles")
 
 // And the handle sizes the library reports, which no sysl declaration depends on but which say the
 // library loaded is the one this was written against.

@@ -3,27 +3,24 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       manifold { git = "github.com/sysl-lang/manifold", version = "0.1.0" }
+//       manifold { git = "github.com/sysl-lang/manifold", version = "0.1.1" }
 //     }
 //
 // The coordinate names the package, `manifold`; the module a program imports is `sh.sysl.manifold`.
 
 package {
   name    = "manifold"
-  version = "0.1.0"
+  version = "0.1.1"
 
   // The compiler this was written and tested against.
-  sysl = "0.8.1"
+  sysl = "0.8.3"
 }
 
 // **`heap`**: every Manifold object is C++ storage allocated by the library, and every copy-out is a
 // `Buf`. **`posix`**: Manifold is a hosted C++ library with a thread pool (TBB) under it.
 //
-// **`pkg_config`, for the library's location only.** Homebrew's `manifold.pc` names `-lmanifold` and
-// its directory, which is what a link needs to find `libmanifoldc` beside it (named by `@link` in
-// `c/c.sysl`). Its `Cflags` carry `-std=c++17`, which is wrong for C and which clang refuses — so
-// this package compiles no C of its own (no `@include`, no `c const`), and the `.pc`'s compile flags
-// never reach a compiler. See `c/c.sysl` for what that costs and how the layouts are checked instead.
+// **`pkg_config`** gives the library's include and link directories; `@link("manifoldc")` in `c/c.sysl`
+// names the C wrapper beside it.
 requires {
   heap  = true
   posix = true

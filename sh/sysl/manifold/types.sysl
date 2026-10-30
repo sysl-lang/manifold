@@ -55,24 +55,24 @@ enum Status
     // A code this binding does not know — a newer Manifold than 3.5.
     Unknown
 
-    // The status a `manifold_status` code names. The C enumeration counts from 0 in the order above.
-    of(code: int) -> Status
+    // The status a `manifold_status` code names.
+    of(code: c.Error) -> Status
         code match
-            0 -> NoError
-            1 -> NonFiniteVertex
-            2 -> NotManifold
-            3 -> VertexIndexOutOfBounds
-            4 -> PropertiesWrongLength
-            5 -> MissingPositionProperties
-            6 -> MergeVectorsDifferentLengths
-            7 -> MergeIndexOutOfBounds
-            8 -> TransformWrongLength
-            9 -> RunIndexWrongLength
-            10 -> FaceIdWrongLength
-            11 -> InvalidConstruction
-            12 -> ResultTooLarge
-            13 -> InvalidTangents
-            14 -> Cancelled
+            c.NO_ERROR -> NoError
+            c.NON_FINITE_VERTEX -> NonFiniteVertex
+            c.NOT_MANIFOLD -> NotManifold
+            c.VERTEX_INDEX_OUT_OF_BOUNDS -> VertexIndexOutOfBounds
+            c.PROPERTIES_WRONG_LENGTH -> PropertiesWrongLength
+            c.MISSING_POSITION_PROPERTIES -> MissingPositionProperties
+            c.MERGE_VECTORS_DIFFERENT_LENGTHS -> MergeVectorsDifferentLengths
+            c.MERGE_INDEX_OUT_OF_BOUNDS -> MergeIndexOutOfBounds
+            c.TRANSFORM_WRONG_LENGTH -> TransformWrongLength
+            c.RUN_INDEX_WRONG_LENGTH -> RunIndexWrongLength
+            c.FACE_ID_WRONG_LENGTH -> FaceIdWrongLength
+            c.INVALID_CONSTRUCTION -> InvalidConstruction
+            c.RESULT_TOO_LARGE -> ResultTooLarge
+            c.INVALID_TANGENTS -> InvalidTangents
+            c.CANCELLED -> Cancelled
             _ -> Unknown
 
     ok(self) -> bool = self == NoError
@@ -99,20 +99,20 @@ enum Status
 end Status
 
 // The C code for each enumeration, kept beside the enumerations so the order is visible in one place.
-private[manifold] op_code(op: Op) -> int
+private[manifold] op_code(op: Op) -> c.OpType
     op match
-        Add -> c.OP_ADD
-        Subtract -> c.OP_SUBTRACT
-        Intersect -> c.OP_INTERSECT
+        Add -> c.ADD
+        Subtract -> c.SUBTRACT
+        Intersect -> c.INTERSECT
 
-private[manifold] fill_code(rule: FillRule) -> int
+private[manifold] fill_code(rule: FillRule) -> c.FillRule
     rule match
         EvenOdd -> c.FILL_RULE_EVEN_ODD
         NonZero -> c.FILL_RULE_NON_ZERO
         Positive -> c.FILL_RULE_POSITIVE
         Negative -> c.FILL_RULE_NEGATIVE
 
-private[manifold] join_code(join: JoinType) -> int
+private[manifold] join_code(join: JoinType) -> c.JoinType
     join match
         Square -> c.JOIN_TYPE_SQUARE
         Round -> c.JOIN_TYPE_ROUND
