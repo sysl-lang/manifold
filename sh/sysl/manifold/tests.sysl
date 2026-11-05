@@ -323,8 +323,8 @@ set_properties_computes_per_vertex_data() =
     assert_eq(mesh.num_prop(), 5, "position plus two")
 
     for v in 0..<mesh.num_vert()
-        assert_eq(f64(props.at(v * 5 + 3)), f64(props.at(v * 5 + 2)), "property 0 is z")
-        assert_eq(props.at(v * 5 + 4), 0.0,"the cube had no properties before")
+        assert_eq(f64(props[v * 5 + 3]), f64(props[v * 5 + 2]), "property 0 is z")
+        assert_eq(props[v * 5 + 4], 0.0,"the cube had no properties before")
 
 @test
 normals_are_written_into_properties() =
@@ -345,7 +345,7 @@ curvature_of_a_sphere_is_one_over_r_squared() =
     var mean = 0.0
 
     for v in 0..<n
-        mean += f64(props.at(v * 4 + 3))
+        mean += f64(props[v * 4 + 3])
 
     assert_near(mean / f64(n), 0.25, 0.02, "Gaussian curvature 1/r^2")
 
@@ -370,12 +370,12 @@ a_ray_through_a_box_hits_both_faces() =
 
     assert_eq(hits.len(), 2, "in and out")
 
-    val first = hits.at(0)
+    val first = hits[0]
 
     assert_vec3(first.position, -1.0, 0.1, 0.2, "entering at x = -1")
     assert_vec3(first.normal, -1.0, 0.0, 0.0, "facing back along the ray")
-    assert_vec3(hits.at(1).position, 1.0, 0.1, 0.2, "leaving at x = 1")
-    assert(first.distance < hits.at(1).distance, "nearest first")
+    assert_vec3(hits[1].position, 1.0, 0.1, 0.2, "leaving at x = 1")
+    assert(first.distance < hits[1].distance, "nearest first")
 
     assert_eq(cube(1.0, 1.0, 1.0).ray_cast(Vec3(5.0, 5.0, 5.0), Vec3(6.0, 6.0, 6.0)).len(), 0, "a miss")
 
@@ -514,7 +514,7 @@ every_mesh_array_has_its_documented_length() =
     assert_eq(mesh.num_run(), 2, "two originals, two runs")
     assert_eq(mesh.run_original_id().len(), 2, "an id a run")
     assert_eq(mesh.run_index().len(), 3, "run starts and the end")
-    assert_eq(mesh.run_index().at(2), u32(mesh.tri_verts().len()), "the last run ends at the end")
+    assert_eq(mesh.run_index()[2], u32(mesh.tri_verts().len()), "the last run ends at the end")
     assert_eq(mesh.run_transform().len(), 24, "twelve floats a run")
     assert_eq(mesh.face_id().len(), mesh.num_tri(), "a face id a triangle")
     val tl = mesh.halfedge_tangent().len()

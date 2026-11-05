@@ -10,10 +10,10 @@
 
 package {
   name    = "manifold"
-  version = "0.1.1"
+  version = "0.1.2"
 
   // The compiler this was written and tested against.
-  sysl = "0.8.3"
+  sysl = "0.9.0"
 }
 
 // **`heap`**: every Manifold object is C++ storage allocated by the library, and every copy-out is a
