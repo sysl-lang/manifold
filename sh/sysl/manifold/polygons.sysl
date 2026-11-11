@@ -17,7 +17,7 @@ private[manifold] polygons_of(contours: []const []const Vec2) -> *c.Polygons
         simples.push(c.simple_polygon(ptr_cast(c.alloc_simple_polygon()), as_ptr(contour), contour.len))
 
     // `manifold_polygons` copies each simple polygon, so they are freed straight after.
-    val ps = c.polygons(ptr_cast(c.alloc_polygons()), as_mut_ptr(simples.view()), simples.len())
+    val ps = c.polygons(ptr_cast(c.alloc_polygons()), as_mut_ptr(simples.view_mut()), simples.len())
 
     for s in simples.view()
         c.delete_simple_polygon(s)
