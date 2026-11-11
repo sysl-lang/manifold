@@ -20,7 +20,7 @@ print(bracket.volume())                              // 1200
 
 ```
 dependencies {
-  manifold { git = "github.com/sysl-lang/manifold", version = "0.1.2" }
+  manifold { git = "github.com/sysl-lang/manifold", version = "0.1.3" }
 }
 ```
 
